@@ -5,14 +5,13 @@ import re
 import sys
 import glob
 import pytz
-import csv
-import tqdm
 
 __UTC__ = pytz.UTC
 
 from datetime import datetime, timezone
 from psycopg2 import extras as ext
 from pprint import pprint
+from tqdm import tqdm
 
 from twitter2sql.core import sql_statements
 from twitter2sql.core.util import clean, c, get_last_modified, within_time_bounds, \
@@ -101,13 +100,14 @@ def upload_twitter_2_sql(database_name,
                 print("{} JSON files after time filtering: from {} to {}".format(
                     len(json_files_to_process), json_files_to_process[0], json_files_to_process[-1]))
 
-            for idx, json_file in enumerate(json_files_to_process):
+            progress_bar = tqdm(json_files_to_process, desc='0/0 tweets inserted')
+            for idx, json_file in enumerate(progress_bar):
                 # For each file, extract the tweets and add the number extracted to the total_tweets_inserted
                 total_tweets_inserted += extract_json_file(os.path.join(folder_path, json_file), cursor, database, keywords,
                     search_text, all_keywords, insert_table_statement, match_dates, start_time, end_time, use_regex_match, 
                     reg_expr, column_header_dict)
 
-                print("{fnum}/{ftotal_tweets_inserted}: {tnum} tweets inserted".format(fnum=idx, ftotal_tweets_inserted=(len(json_files_to_process) + 1), tnum=total_tweets_inserted))
+                progress_bar.set_description("{fnum}/{ftotal_tweets_inserted}: {tnum} tweets inserted".format(fnum=idx, ftotal_tweets_inserted=(len(json_files_to_process) + 1), tnum=total_tweets_inserted))
                 sys.stdout.flush()
 
         # Close everything
@@ -308,7 +308,7 @@ def get_nested_value(outer_dict, path_str, default=None):
         return current_dict
 
     # The value didn't exist
-    except (KeyError, TypeError, IndexError) as e:
+    except (KeyError, TypeError, IndexError):
         # pprint(outer_dict)
         # print(path_str)
         # raise e
@@ -359,7 +359,7 @@ def extract_tweet(tweet, column_header_dict):
 
         item += [add_item]
   
-    # print(item)
+    # pprint(item)
 
     return item
 

@@ -1,4 +1,5 @@
-""" This code is stupid and gross but it's probably the least complicated way without adding extra libraries
+""" This code is stupid and gross but it's probably the least complicated way 
+without adding extra libraries.
 """
 
 import csv
@@ -39,7 +40,8 @@ def not_null_statement(table_name, where_col, select=None, distinct=None):
         SELECT {distinct} {select}
         FROM {table}
         WHERE {where_col} IS NOT NULL;
-        """).format(select=select, table=sql.Identifier(table_name), where_col=sql.Identifier(where_col), distinct=distinct)
+        """).format(select=select, table=sql.Identifier(table_name), 
+                        where_col=sql.Identifier(where_col), distinct=distinct)
 
     return sql_statement
 
@@ -116,7 +118,15 @@ def table_permission_statement(table_name, admins):
     """
 
     for admin in admins:
-        sql_statement = """GRANT ALL ON TABLE public.{table} TO {user};""".format(table=table_name, user=admin)
+        sql_statement = """GRANT ALL ON TABLE public.{table} TO {user};
+                                """.format(table=table_name, user=admin)
+
+    return sql_statement
+
+
+def drop_table_statement(table_name):
+
+    sql_statement = """DROP TABLE {}""".format(table_name)
 
     return sql_statement
 
@@ -146,7 +156,7 @@ def create_table_statement(input_schema, table_name):
     else:
         print()
 
-    create_statement = create_statement[:-1] + ')'  # Replace final comma with )
+    create_statement = create_statement[:-1] + ')'  # Replace last comma with )
     create_statement += ";"
 
     return create_statement
@@ -158,7 +168,8 @@ def insert_statement(input_schema, table_name):
     dicts or csv files.
     """
 
-    insert_statement = "INSERT INTO {} (".format(table_name)
+    insert_statement = sql.SQL("INSERT INTO {} (").format(
+        sql.Identifier(table_name))
 
     if type(input_schema) is str:
 
@@ -181,11 +192,50 @@ def insert_statement(input_schema, table_name):
         return
 
     else:
-        print()
+        raise ValueError("""Insert statements require either dict or str (.csv)
+            as input.""")
 
-    insert_statement = insert_statement[:-1] + ") VALUES ("  # Replace final comma with )
+    # Replace final comma with )
+    insert_statement = insert_statement[:-1] + ") VALUES (" 
     for i in range(value_num):
         insert_statement += '%s,'
-    insert_statement = insert_statement[:-1] + ')'  # Replace final comma with )
+    # Replace final comma with )
+    insert_statement = insert_statement[:-1] + ')' 
 
     return insert_statement
+
+
+def category_statement(input_table, input_schema):
+
+    sql_statement = sql.SQL("""UPDATE {table}""").format(
+        table=sql.Identifier(input_table))
+
+    if type(input_schema) is str:
+
+        with open(input_schema, 'r') as readfile:
+            reader = csv.reader(readfile, delimiter=',')
+
+            value_num = 0
+
+            for row in reader:
+                insert_statement += row[0] + ','
+                value_num += 1
+
+    elif type(input_schema) is dict:
+
+        value_num = len(input_schema)
+        for column_header, data_type in input_schema.items():
+            insert_statement += column_header + ','
+
+        return
+
+    else:
+        raise ValueError("""Category statements require either dict or str (.csv)
+            as input.""")   
+
+    statement = """
+    UPDATE tbl
+    SET    one_year_survival = (survival OR survival_days >= 365);
+    """
+
+    return
