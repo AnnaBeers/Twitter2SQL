@@ -113,7 +113,7 @@ def grab_top(database_name=None,
                         db_config_file=None,
                         cursor=None,
                         column_name='example',
-                        num_returned=10000,
+                        num_returned=100,
                         table_name='table',
                         return_headers=None,
                         distinct=None,
@@ -127,8 +127,9 @@ def grab_top(database_name=None,
 
     if distinct is None:
         sql_statement = sql.SQL("""
-            SELECT *
-            FROM {}
+            SELECT user_screen_name,user_name,user_description,user_created_ts,user_followers_count,user_id,created_at,complete_text
+            FROM (SELECT DISTINCT ON (user_id) user_screen_name,user_name,user_description,user_created_ts,user_followers_count,user_id,created_at,complete_text 
+            FROM {} WHERE lang='en') as sub_table
             ORDER BY {} DESC
             LIMIT %s;
             """).format(sql.Identifier(table_name), sql.Identifier(column_name))
@@ -146,14 +147,8 @@ def grab_top(database_name=None,
                 sql.Identifier(column_name)), 
                 [num_returned])
 
-    results = to_list_of_dicts(cursor)[0:10]
-
-    for result in results:
-        print(result)
-
-    return
-
-    results = remove_duplicates(dict_result, limit=100)
+    results = to_list_of_dicts(cursor)
+    # results = remove_duplicates(results, limit=100)
 
     if output_filename is not None:
         save_to_csv(results, output_filename, output_column_headers)

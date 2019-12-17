@@ -8,15 +8,6 @@ from twitter2sql.core.util import clean, c, get_last_modified, \
     within_time_bounds, open_database, close_database, \
     get_column_header_dict, to_list_of_dicts
 
-"""
-How to create a hashtag table in postgres
-CREATE TABLE hashtags as
-SELECT  "id" as tweetid, t->>'text' as hashtag
-FROM    tweets j
-CROSS JOIN
-        json_array_elements("entities"->'hashtags') t
-"""
-
 
 def hashtag_sql_statement(input_table_name, output_table_name, hashtag_col, 
                             select):
@@ -38,22 +29,30 @@ def hashtag_sql_statement(input_table_name, output_table_name, hashtag_col,
 def generate_hashtag_table(database_name,
                 db_config_file,
                 input_table_name,
-                output_table_name,
+                hashtag_table_name,
                 hashtag_col,
-                select_col,
+                id_col,
+                admins,
                 overwrite=False):
 
     database, cursor = open_database(database_name, db_config_file)
 
     if overwrite:
-        cursor.execute(sql_statements.drop_table_statement(output_table_name))
+        cursor.execute(sql_statements.drop_table_statement(hashtag_table_name))
 
     hashtag_create_statement = hashtag_sql_statement(input_table_name, 
-                                                    output_table_name,
+                                                    hashtag_table_name,
                                                     hashtag_col,
-                                                    select_col)
+                                                    id_col)
 
     cursor.execute(hashtag_create_statement)
+    database.commit()
+
+    # Add admins to the table.
+    admin_add_statement = sql_statements.table_permission_statement(
+        hashtag_table_name, 
+        admins)
+    cursor.execute(admin_add_statement)
     database.commit()
 
     return
@@ -61,7 +60,27 @@ def generate_hashtag_table(database_name,
 
 def append_hashtag_clusters(database_name,
                 db_config_file,
-                table_name)
+                hashtag_table_name,
+                hashtag_cluster_csv,
+                hashtag_col='hashtags',
+                cluster_col='clusters'):
+
+    database, cursor = open_database(database_name, db_config_file)
+
+    create_col_statement = sql.SQL("""ALTER TABLE {table}\n
+        ADD COLUMN IF NOT EXISTS {cluster_col} VARCHAR;""").format(
+        table=sql.SQL(hashtag_table_name),
+        cluster_col=sql.SQL(cluster_col))
+    cursor.execute(create_col_statement)
+
+    classify_statement, classify_values = sql_statements.category_statement(
+        hashtag_table_name,
+        hashtag_cluster_csv,
+        hashtag_col,
+        cluster_col)
+
+    cursor.execute(classify_statement, classify_values)
+    database.commit()
 
     return
 
