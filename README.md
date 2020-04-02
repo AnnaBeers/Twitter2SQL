@@ -1,7 +1,7 @@
 
 # Twitter2SQL
 
-A python package for manipulating Twitter JSON data ins PostgreSQL databases.
+A python package for manipulating Twitter JSON data with PostgreSQL databases.
 
 ## Table of Contents
 - [:question: About](#about)
