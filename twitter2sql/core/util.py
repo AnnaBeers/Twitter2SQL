@@ -2,15 +2,28 @@ import time
 import os
 import psycopg2
 import csv
+import pandas as pd
+import re
+import tweepy
 
 from datetime import timedelta
 from datetime import datetime
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 
+def open_tweepy_api(twitter_c_key, twitter_c_key_secret, 
+                twitter_a_key, twitter_a_key_secret):
+
+    #authorize twitter, initialize tweepy
+    auth = tweepy.OAuthHandler(twitter_c_key, twitter_c_key_secret)
+    auth.set_access_token(twitter_a_key, twitter_a_key_secret)
+    api = tweepy.API(auth)
+    return api
+
+
 def open_database(database_name, 
                     db_config_file, 
-                    create_new_db=False, 
+                    overwrite_db=False, 
                     owner='example',
                     admins=[]):
 
@@ -20,7 +33,9 @@ def open_database(database_name,
         key, value = line.strip().split("=")
         database_config[key] = value
 
-    if create_new_db:
+    # cursor.execute("select * from information_schema.tables where table_name=%s", ('mytable',))
+
+    if overwrite_db:
         create_statement = """CREATE DATABASE {db}
             WITH
             OWNER = {owner}
@@ -92,7 +107,14 @@ def clean(s):
         s = s.decode('utf-8')
 
     # Replace weird characters that make Postgres unhappy
-    return s.replace("\x00", "") if s else None
+
+    s = s.replace("\x00", "") if s else None
+    # re_pattern = re.compile(u"\u0000", re.UNICODE)
+    # s = re_pattern.sub(u'\u0000', '')
+    # add_item = re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'', add_item)
+    s = re.sub(r'(?<!\\)\\u0000', r'', s) if s else None
+
+    return s
 
 
 def c(u):
@@ -176,3 +198,14 @@ def to_list_of_dicts(cursor):
         dict_result.append(dict(row))
 
     return dict_result
+
+
+def to_pandas(cursor):
+
+    results = cursor.fetchall()
+
+    column_headers = list(results[0].keys())
+    data_frame = pd.DataFrame(results)
+    data_frame.columns = column_headers
+
+    return data_frame

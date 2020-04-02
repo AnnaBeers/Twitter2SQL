@@ -1,5 +1,7 @@
 import psycopg2
+import tweepy
 
+from tweepy.auth import OAuthHandler
 from psycopg2 import sql
 from pprint import pprint
 
@@ -77,7 +79,7 @@ def generate_users_table(database_name,
     return
 
 
-def execute_sql(statement, column_name, dtype, cursor, database, message,
+def execute_user_sql(statement, column_name, dtype, cursor, database, message,
                     user_table_name='users', tweet_table_name='tweets'):
 
     create_col_statement = sql_statements.create_col_statement(user_table_name,
@@ -100,11 +102,10 @@ def generate_user_statistics(database_name,
                 db_config_file,
                 tweet_table_name,
                 user_table_name,
-                total_posts_col,
                 overwrite=False):
 
     database, cursor = open_database(database_name, db_config_file)
-
+    
     # Total Posts
     if True:
         total_post_statement = sql.SQL("""UPDATE {user_table}\n
@@ -115,8 +116,8 @@ def generate_user_statistics(database_name,
             WHERE {user_table}.user_id = temp.user_id
             """)
 
-        execute_sql(total_post_statement, total_posts_col, 'INT', cursor,
-            database, 'total post count')
+        execute_user_sql(total_post_statement, 'total_database_tweets', 'INT', 
+            cursor, database, 'total post count')
 
     # First Post, Statuses Count
     if True:
@@ -129,7 +130,7 @@ def generate_user_statistics(database_name,
             WHERE {user_table}.user_id = temp.user_id
             """)
 
-        execute_sql(first_post_statement, 'first_created_ts', 'TIMESTAMP', 
+        execute_user_sql(first_post_statement, 'first_created_ts', 'TIMESTAMP', 
             cursor, database, 'first post')
 
         first_post_statement = sql.SQL("""UPDATE {user_table}\n
@@ -142,7 +143,7 @@ def generate_user_statistics(database_name,
             WHERE {user_table}.user_id = temp.user_id
             """)
 
-        execute_sql(first_post_statement, 'first_status_count', 'INT', 
+        execute_user_sql(first_post_statement, 'first_status_count', 'INT', 
             cursor, database, 'first status count')
 
     # Time Differences
@@ -152,7 +153,7 @@ def generate_user_statistics(database_name,
             FROM last_created_ts - first_created_ts)
             """)
 
-        execute_sql(date_range_statement, 'database_active_days', 'INT', 
+        execute_user_sql(date_range_statement, 'database_active_days', 'INT', 
             cursor, database, 'active days in database')
 
         date_range_statement = sql.SQL("""UPDATE {user_table}\n
@@ -160,7 +161,7 @@ def generate_user_statistics(database_name,
             FROM first_created_ts - user_created_ts)
             """)
 
-        execute_sql(date_range_statement, 'previous_active_days', 'INT', 
+        execute_user_sql(date_range_statement, 'previous_active_days', 'INT', 
             cursor, database, 'previously active days')
 
     # Rates
@@ -170,7 +171,7 @@ def generate_user_statistics(database_name,
             / NULLIF(database_active_days,0)
             """)
 
-        execute_sql(rate_statement, 'database_posting_rate', 'NUMERIC', 
+        execute_user_sql(rate_statement, 'database_posting_rate', 'NUMERIC', 
             cursor, database, 'database posting rate')
 
         rate_statement = sql.SQL("""UPDATE {user_table}\n
@@ -178,7 +179,7 @@ def generate_user_statistics(database_name,
             / NULLIF(previous_active_days,0)
             """)
 
-        execute_sql(rate_statement, 'previous_posting_rate', 'NUMERIC', 
+        execute_user_sql(rate_statement, 'previous_posting_rate', 'NUMERIC', 
             cursor, database, 'previous rate statement')        
 
         rate_statement = sql.SQL("""UPDATE {user_table}\n
@@ -186,16 +187,25 @@ def generate_user_statistics(database_name,
             / NULLIF(previous_posting_rate,0)
             """)
 
-        execute_sql(rate_statement, 'previous_current_posting_rate_ratio', 
+        execute_user_sql(rate_statement, 'previous_current_posting_rate_ratio', 
             'NUMERIC', cursor, database, 'posting rate ratio statement')   
 
     return
 
 
-def generate_suspended_users():
+def generate_suspended_users(database_name,
+                db_config_file,
+                tweet_table_name,
+                user_table_name,
+                total_posts_col,
+                overwrite=False):
+
+    """ This might load too much into memory for large databases.
+    """
 
     return
 
 
 if __name__ == '__main__':
+    # generate_suspended_users
     pass

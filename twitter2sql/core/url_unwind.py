@@ -1,27 +1,28 @@
 # coding: utf-8
 
-from urllib.parse import urlparse
-import requests
 
+import requests
 import csv
-from datetime import datetime
 import json
 import multiprocessing as mp
 import os
 import psycopg2
-from psycopg2 import extras as ext
 import re
 import requests
 import sys
 import time
 
+from psycopg2 import extras as ext
+from datetime import datetime
 from tqdm import tqdm
 from functools import partial
 from pprint import pprint
+from urllib.parse import urlparse
 
 from twitter2sql.core import sql_statements
-from twitter2sql.core.util import clean, c, get_last_modified, within_time_bounds, \
-    open_database, close_database, get_column_header_dict
+from twitter2sql.core.util import clean, c, get_last_modified, \
+    within_time_bounds, open_database, close_database, \
+    get_column_header_dict
 
 
 def unwind_urls(database_name,
@@ -58,7 +59,7 @@ def unwind_urls(database_name,
 
     # Add admins to the table.
     admin_add_statement = sql_statements.table_permission_statement(
-        hashtag_table_name, 
+        output_table_name, 
         admins)
     cursor.execute(admin_add_statement)
     database.commit()
@@ -111,8 +112,6 @@ def unwind_urls(database_name,
 
     insert_table_statement = sql_statements.insert_statement(column_headers,
         output_table_name)
-
-    print(insert_table_statement)
 
     ext.execute_batch(cursor, insert_table_statement, compiled_urls)
     close_database(cursor, database)

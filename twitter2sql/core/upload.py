@@ -1,6 +1,5 @@
 import json
 import os
-import psycopg2
 import re
 import sys
 import glob
@@ -10,12 +9,15 @@ __UTC__ = pytz.UTC
 
 from datetime import datetime, timezone
 from psycopg2 import extras as ext
+from psycopg2.extras import Json
 from pprint import pprint
 from tqdm import tqdm
 
 from twitter2sql.core import sql_statements
-from twitter2sql.core.util import clean, c, get_last_modified, within_time_bounds, \
-    open_database, close_database, get_column_header_dict
+from twitter2sql.core.util import clean, get_last_modified, \
+    within_time_bounds, open_database, close_database, \
+    get_column_header_dict
+
 
 # CREATE_TABLE_STMT = sql_statements.CREATE_TABLE_STMT
 # INSERT_TWEET_STMT = sql_statements.INSERT_TWEET_STMT
@@ -24,11 +26,14 @@ from twitter2sql.core.util import clean, c, get_last_modified, within_time_bound
 """1. Configure parameters
 
 Text search
-This will search the full text of the tweet, any retweeted_status text, and any quoted_status text.
+This will search the full text of the tweet, any retweeted_status text, and any
+ quoted_status text.
 
 `search_text`: set to True if you want to use text search
 `keywords`: add the keywords you want to match here
-`all_keywords`: whether to check for all keywords. If true, it will match only tweets that have all keywords. If false it will check whether any of the keywords exist
+`all_keywords`: whether to check for all keywords. If true, it will match only
+ tweets that have all keywords. If false it will check whether any of the 
+ keywords exist
 
 """
 
@@ -49,14 +54,16 @@ def upload_twitter_2_sql(database_name,
                             end_time=datetime.utcnow().replace(tzinfo=timezone.utc),
                             use_regex_match=False,
                             reg_expr='example_regex',
-                            create_new_db=False,
+                            overwrite_db=True,
                             overwrite=True):
     
     create_table_statement = sql_statements.create_table_statement(table_format_csv, table_name)
     insert_table_statement = sql_statements.insert_statement(table_format_csv, table_name)
-    database, cursor = open_database(database_name, db_config_file, create_new_db, owner, admins)
+    database, cursor = open_database(database_name, db_config_file, overwrite_db, owner, admins)
 
     if overwrite:
+        # This errors if the tweets table does not yet exist.
+        # Fix that!
         cursor.execute("DROP TABLE IF EXISTS tweets;")
         pass
     else:
@@ -159,7 +166,11 @@ def extract_json_file(json_file_path, cursor, database, keywords, search_text,
                 print(line)
             
         # Insert all the extracted tweets into the database
-        ext.execute_batch(cursor, insert_table_statement, queue)
+        try:
+            ext.execute_batch(cursor, insert_table_statement, queue)
+        except Exception as e:
+            print(json_file_path)
+            raise(e)
         
         # Just to keep track of how many have been inserted
         return len(queue)
@@ -237,7 +248,8 @@ def get_complete_text(tweet):
             orig_complete_text=get_complete_text(tweet["retweeted_status"]))
         return return_text
 
-    # I am fairly certain that the only way you can quote a tweet is by quoting the original tweet; i.e. I don't think you can quote a retweet
+    # I am fairly certain that the only way you can quote a tweet is by 
+    # quoting the original tweet; i.e. I don't think you can quote a retweet
     elif "quoted_status" in tweet:
         return_text = "{qt_complete_text} QT @{username}: {orig_complete_text}".format(
             qt_complete_text=tweet_complete_text,
@@ -256,7 +268,8 @@ def get_matching_keywords(search_string, keywords):
     """
 
     # keyword_regex = r"(\b({reg}))|(({reg})\b)".format(reg="|".join(keywords))
-    keywords = ["(\\b" + x + "\\b)" if x[0] != '#' else '(' + x + "\\b)" for x in keywords]
+    keywords = ["(\\b" + x + "\\b)" if x[0] != '#'
+        else '(' + x + "\\b)" for x in keywords]
     keyword_regex = r"({reg})".format(reg="|".join(keywords))
     matches = []
 
@@ -288,7 +301,8 @@ def get_nested_value(outer_dict, path_str, default=None):
     If the path isn't valid, nothing will be returned.
     """
 
-    path = path_str.split(".")  # get a list of nested dictionary keys (the path)
+    # get a list of nested dictionary keys (the path)
+    path = path_str.split(".")
     current_dict = outer_dict
 
     # step through the path and try to process it
@@ -317,9 +331,11 @@ def get_nested_value(outer_dict, path_str, default=None):
     return default
 
 
-# @profile
 def extract_tweet(tweet, column_header_dict):
     # Adding everything to a huge tuple and inserting the tuple to the database
+
+    # Remove null value
+    # tweet = str.replace(u"\u2022","something")
 
     entities = tweet["entities"]
     if tweet["truncated"]:
@@ -347,6 +363,12 @@ def extract_tweet(tweet, column_header_dict):
                 add_item = get_nested_value_json(entities, value["json_fieldname"])
             elif key == 'expanded_url_0':
                 add_item = get_nested_value(entities, value["json_fieldname"])
+            elif key == 'video_url_0':
+                add_item = get_nested_value(entities, value["json_fieldname"])
+                if add_item is not None:
+                    for variant in add_item:
+                        if variant['content_type'] != 'application/x-mpegURL':
+                            add_item = variant['url']
             elif value['instructions'] == 'dump_json':
                 add_item = json.dumps(tweet)
             elif value['type'] == 'json':
@@ -358,8 +380,6 @@ def extract_tweet(tweet, column_header_dict):
                 add_item = clean(add_item)
 
         item += [add_item]
-  
-    # pprint(item)
 
     return item
 

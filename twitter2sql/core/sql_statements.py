@@ -1,7 +1,3 @@
-""" This code is stupid and gross but it's probably the least complicated way 
-without adding extra libraries.
-"""
-
 import csv
 
 from psycopg2 import sql
@@ -277,14 +273,14 @@ def category_statement(input_table, input_schema, input_column,
 
         if idx == 0:
             sql_statement += sql.SQL("""SET {output} = CASE WHEN UPPER({input}) \
-IN ({values}) THEN {category}\n""").format(
+                IN ({values}) THEN {category}\n""").format(
                 input=sql.SQL(input_column),
                 output=sql.SQL(output_column),
                 category=sql.Literal(key),
                 values=value_string)  
         else:
             sql_statement += sql.SQL("""WHEN UPPER({input}) \
-IN ({values}) THEN {category}\n""").format(
+                IN ({values}) THEN {category}\n""").format(
                 input=sql.SQL(input_column),
                 output=sql.Identifier(output_column),
                 category=sql.Literal(key),
@@ -292,7 +288,7 @@ IN ({values}) THEN {category}\n""").format(
         
         if idx == len(header) - 1:
             sql_statement += sql.SQL("""ELSE \
-{category}\nEND""").format(
+                {category}\nEND""").format(
                 input=sql.Identifier(input_column),
                 output=sql.Identifier(output_column),
                 category=sql.Literal('null'),

@@ -33,7 +33,8 @@ def generate_hashtag_table(database_name,
                 hashtag_col,
                 id_col,
                 admins,
-                overwrite=False):
+                overwrite=False,
+                verbose=True):
 
     database, cursor = open_database(database_name, db_config_file)
 
@@ -45,6 +46,8 @@ def generate_hashtag_table(database_name,
                                                     hashtag_col,
                                                     id_col)
 
+    if verbose:
+        print('Generating hashtag table..')
     cursor.execute(hashtag_create_statement)
     database.commit()
 
