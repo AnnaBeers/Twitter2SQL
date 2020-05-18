@@ -12,7 +12,7 @@ from twitter2sql.core.util import clean, c, get_last_modified, \
 
 
 def users_sql_statement(input_table_name, output_table_name, 
-                        id_col, select_cols):
+                        id_col, event_split_date=None):
 
     create_statement = sql.SQL("""CREATE TABLE IF NOT EXISTS {} AS
                             """.format(output_table_name))
@@ -54,6 +54,7 @@ def generate_users_table(database_name,
                 user_table_name,
                 user_id_col,
                 admins,
+                event_split_date=None,
                 overwrite=False):
 
     database, cursor = open_database(database_name, db_config_file)
@@ -64,7 +65,7 @@ def generate_users_table(database_name,
     users_create_statement = users_sql_statement(input_table_name, 
                                                     user_table_name,
                                                     user_id_col,
-                                                    None)
+                                                    event_split_date)
 
     cursor.execute(users_create_statement)
     database.commit()
@@ -106,6 +107,8 @@ def generate_user_statistics(database_name,
 
     database, cursor = open_database(database_name, db_config_file)
     
+    # If statements are for testing, remove or make parameter eventually.
+
     # Total Posts
     if True:
         total_post_statement = sql.SQL("""UPDATE {user_table}\n
@@ -207,5 +210,4 @@ def generate_suspended_users(database_name,
 
 
 if __name__ == '__main__':
-    # generate_suspended_users
     pass

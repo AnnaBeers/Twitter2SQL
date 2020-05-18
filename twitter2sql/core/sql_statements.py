@@ -237,7 +237,67 @@ def insert_statement(input_schema, table_name):
     return insert_statement
 
 
-def category_statement(input_table, input_schema, input_column,
+def category_statement(input_table, input_schema, key_column):
+
+    sql_statement = sql.SQL("""UPDATE {table}\n""").format(
+        table=sql.Identifier(input_table))
+
+    if type(input_schema) is str:
+
+        with open(input_schema, 'r') as readfile:
+            reader = csv.reader(readfile, delimiter=',')
+
+            category_dict = defaultdict(list)
+            header = next(reader)
+
+            for row in reader:
+                for idx, item in enumerate(row):
+                    category_dict[header[idx]] += [item]
+
+    elif type(input_schema) is dict:
+        raise ValueError("""Dict input not yet implemented.""")  
+
+    else:
+        raise ValueError("""Category statements require either dict or str (.csv)
+            as input.""") 
+
+    return_values = []
+    for idx, (key, values) in enumerate(category_dict.items()):
+        
+        return_values += values
+        value_string = ''
+        for item in values:
+            value_string += '%s,'
+        value_string = sql.SQL(value_string[:-1])
+
+        if idx == 0:
+            sql_statement += sql.SQL("""SET {output} = CASE WHEN UPPER({input}) \
+                IN ({values}) THEN {category}\n""").format(
+                input=sql.SQL(input_column),
+                output=sql.SQL(output_column),
+                category=sql.Literal(key),
+                values=value_string)  
+        else:
+            sql_statement += sql.SQL("""WHEN UPPER({input}) \
+                IN ({values}) THEN {category}\n""").format(
+                input=sql.SQL(input_column),
+                output=sql.Identifier(output_column),
+                category=sql.Literal(key),
+                values=value_string)  
+        
+        if idx == len(header) - 1:
+            sql_statement += sql.SQL("""ELSE \
+                {category}\nEND""").format(
+                input=sql.Identifier(input_column),
+                output=sql.Identifier(output_column),
+                category=sql.Literal('null'),
+                values=value_string)  
+                
+
+    return
+
+
+def membership_statement(input_table, input_schema, input_column,
                         output_column):
 
     sql_statement = sql.SQL("""UPDATE {table}\n""").format(
@@ -295,3 +355,8 @@ def category_statement(input_table, input_schema, input_column,
                 values=value_string)  
 
     return sql_statement, return_values
+
+
+def random_statement(input_table, columns, n):
+
+    return

@@ -3,6 +3,7 @@ import csv
 import os
 
 from pprint import pprint
+from tqdm import tqdm
 
 
 def get_list_members(api, user, list_id, output_csv_folder):
@@ -28,6 +29,26 @@ def get_list_members(api, user, list_id, output_csv_folder):
         except Exception as e:
             print(f'Failed on {slug}')
             print(e)
+
+    return None
+
+
+def add_to_list(api, input_ids, list_id):
+    
+    if type(input_ids) is list:
+        pass
+    elif type(input_ids) is str:
+        if input_ids.endswith('.txt'):
+            with open(input_ids, 'r') as f:
+                input_ids = f.readlines()
+        else:
+            raise ValueError(f"{input_ids} in str format must be a .txt file.")
+    else:
+        raise ValueError(f"{input_ids} must be either a filepath or a list of screen names.")
+
+    for idx, uid in enumerate(tqdm(input_ids)):
+        print(list_id, uid)
+        api.add_list_member(list_id=str(list_id), user_id=uid)
 
     return None
 

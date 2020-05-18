@@ -55,7 +55,9 @@ def upload_twitter_2_sql(database_name,
                             use_regex_match=False,
                             reg_expr='example_regex',
                             overwrite_db=True,
-                            overwrite=True):
+                            overwrite=True,
+                            timestamp='modified',
+                            json_mode='newline'):
     
     create_table_statement = sql_statements.create_table_statement(table_format_csv, table_name)
     insert_table_statement = sql_statements.insert_statement(table_format_csv, table_name)
@@ -112,7 +114,7 @@ def upload_twitter_2_sql(database_name,
                 # For each file, extract the tweets and add the number extracted to the total_tweets_inserted
                 total_tweets_inserted += extract_json_file(os.path.join(folder_path, json_file), cursor, database, keywords,
                     search_text, all_keywords, insert_table_statement, match_dates, start_time, end_time, use_regex_match, 
-                    reg_expr, column_header_dict)
+                    reg_expr, column_header_dict, json_mode=json_mode)
 
                 progress_bar.set_description("{fnum}/{ftotal_tweets_inserted}: {tnum} tweets inserted".format(fnum=idx, ftotal_tweets_inserted=(len(json_files_to_process) + 1), tnum=total_tweets_inserted))
                 sys.stdout.flush()
@@ -138,11 +140,16 @@ def extract_json_file(json_file_path, cursor, database, keywords, search_text,
                             end_time=datetime.utcnow().replace(tzinfo=timezone.utc),
                             use_regex_match=False,
                             reg_expr='example_regex',
-                            column_header_dict=None):
+                            column_header_dict=None,
+                            json_mode='newline'):
 
     with open(json_file_path, 'r') as infile:
         queue = []
-        lines = [line for line in infile if (line and len(line) >= 2)]  # ????
+
+        if json_mode == 'newline':
+            lines = [line for line in infile if (line and len(line) >= 2)]  # ????
+        elif json_mode == 'list':
+            lines = json.load(infile)
 
         for line in lines:
 
@@ -150,7 +157,10 @@ def extract_json_file(json_file_path, cursor, database, keywords, search_text,
             # There's like one tweet in one json file that is bad json, so I've just been skipping
             # it. If there end up being a lot, we should probably figure out why that's happening.
             try:
-                tweet = json.loads(line)
+                if json_mode == 'newline':
+                    tweet = json.loads(line)
+                else:
+                    tweet = line
                 
                 # Make sure that the tweet matches all filtering parameters
                 if matches_parameters(tweet, search_text, keywords, all_keywords, match_dates, 
@@ -236,7 +246,11 @@ def get_complete_text(tweet):
         back in later. Used the c() function.
     """
 
-    tweet_complete_text = tweet["text"]
+    if 'text' in tweet:
+        tweet_complete_text = tweet["text"]
+    else:
+        tweet_complete_text = tweet['full_text']
+
     if tweet["truncated"]:
         # Applicable to original tweets and commentary on quoted tweets
         tweet_complete_text = tweet["extended_tweet"]["full_text"]
@@ -315,9 +329,6 @@ def get_nested_value(outer_dict, path_str, default=None):
             # Get the nested value associated with that key
             current_dict = current_dict[step]
 
-            if path_str == 'favorite_count' and current_dict != 0:
-                print(current_dict)
-
         # Once it's at the end of the path, return the nested value
         return current_dict
 
@@ -333,18 +344,25 @@ def get_nested_value(outer_dict, path_str, default=None):
 
 def extract_tweet(tweet, column_header_dict):
     # Adding everything to a huge tuple and inserting the tuple to the database
-
-    # Remove null value
-    # tweet = str.replace(u"\u2022","something")
+    # TODO: Problems here with extended entites.
 
     entities = tweet["entities"]
+    extended_entities = None
+    if 'extended_entities' in tweet:
+        extended_entities = tweet['extended_entities']
     if tweet["truncated"]:
         entities = tweet["extended_tweet"]["entities"]
+        if 'extended_entities' in tweet['extended_tweet']:
+            extended_entities = tweet['extended_tweet']['extended_entities']
     elif "retweeted_status" in tweet:
         if tweet["retweeted_status"]["truncated"]:
             entities = tweet["retweeted_status"]["extended_tweet"]["entities"]
+            if 'extended_entities' in tweet['retweeted_status']['extended_tweet']:
+                extended_entities = tweet["retweeted_status"]["extended_tweet"]["extended_entities"]
         else:
             entities = tweet["retweeted_status"]["entities"]
+            if 'extended_entities' in tweet['retweeted_status']:
+                extended_entities = tweet["retweeted_status"]["extended_entities"]
 
     item = []
     for key, value in column_header_dict.items():
@@ -359,16 +377,40 @@ def extract_tweet(tweet, column_header_dict):
                 time = get_nested_value(tweet, value['instructions'])
                 add_item = datetime.strptime(time[0:19] + time[25:], "%a %b %d %H:%M:%S %Y")
         else:
-            if key == 'urls':
-                add_item = get_nested_value_json(entities, value["json_fieldname"])
-            elif key == 'expanded_url_0':
-                add_item = get_nested_value(entities, value["json_fieldname"])
-            elif key == 'video_url_0':
+            if key == 'video_url_0':
                 add_item = get_nested_value(entities, value["json_fieldname"])
                 if add_item is not None:
                     for variant in add_item:
                         if variant['content_type'] != 'application/x-mpegURL':
                             add_item = variant['url']
+            elif key == 'urls':
+                add_item = get_nested_value_json(entities, value["json_fieldname"])
+            elif key == 'photo':
+                add_item = False
+                if 'media' in entities:
+                    for media in entities['media']:
+                        if media['type'] == 'photo':
+                            add_item = True
+                if extended_entities is not None: 
+                    if 'media' in extended_entities:
+                        for media in extended_entities['media']:
+                            if media['type'] == 'photo':
+                                add_item = True
+            elif key == 'video':
+                add_item = False
+                if 'media' in entities:
+                    for media in entities['media']:
+                        if media['type'] == 'video':
+                            add_item = True
+                if extended_entities is not None:
+                    if 'media' in extended_entities:
+                        for media in extended_entities['media']:
+                            if media['type'] == 'video':
+                                add_item = True
+            elif value['instructions'] == 'entities':
+                add_item = get_nested_value(entities, value["json_fieldname"])
+            elif value['instructions'] == 'extended_entities':
+                add_item = get_nested_value(extended_entities, value["json_fieldname"])
             elif value['instructions'] == 'dump_json':
                 add_item = json.dumps(tweet)
             elif value['type'] == 'json':
@@ -376,7 +418,7 @@ def extract_tweet(tweet, column_header_dict):
             else:
                 add_item = get_nested_value(tweet, value["json_fieldname"])
 
-            if value['clean']:
+            if value['clean'] and value['type'] != 'boolean':
                 add_item = clean(add_item)
 
         item += [add_item]

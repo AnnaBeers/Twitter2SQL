@@ -18,7 +18,7 @@ def hashtag_sql_statement(input_table_name, output_table_name, hashtag_col,
     create_statement += sql.SQL("""
         SELECT {select}, hashtag_obj->>'text' AS {hashtag}
         FROM {table}
-        CROSS JOIN json_array_elements("entities"->'hashtags') hashtag_obj
+        CROSS JOIN json_array_elements(tweets.tweet->"entities"->'hashtags') hashtag_obj
         """).format(select=sql.Identifier(select),
                         table=sql.Identifier(input_table_name),
                         hashtag=sql.Identifier(hashtag_col))

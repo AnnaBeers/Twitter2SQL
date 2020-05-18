@@ -17,7 +17,7 @@ if sys.version_info[:2] < (3, 5):
 
 setup(
     name='twitter2sql',
-    version='0.2.3',
+    version='0.1.1',
     description=DOCLINES[0],
     packages=find_packages(),
     entry_points={
@@ -25,7 +25,7 @@ setup(
     },
     author='Andrew Beers',
     author_email='albeers@uw.edu',
-    url='https://github.com/AndrewBeers/Twitter2SQLo',  # use the URL to the github repo
+    url='https://github.com/AndrewBeers/Twitter2SQL',  # use the URL to the github repo
     download_url='https://github.com/AndrewBeers/Twitter2SQL/0.1.1',
     keywords=['twitter', 'sql'],
     install_requires=[],

@@ -5,10 +5,16 @@ import csv
 import pandas as pd
 import re
 import tweepy
+import json
 
 from datetime import timedelta
 from datetime import datetime
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from collections import defaultdict
+
+
+def twitter_str_to_dt(dt_str):
+    return datetime.strptime(dt_str, "%a %b %d %H:%M:%S +0000 %Y")
 
 
 def open_tweepy_api(twitter_c_key, twitter_c_key_secret, 
@@ -25,7 +31,9 @@ def open_database(database_name,
                     db_config_file, 
                     overwrite_db=False, 
                     owner='example',
-                    admins=[]):
+                    admins=[],
+                    named_cursor=None,
+                    itersize=None,):
 
     # Parse the database credentials out of the file
     database_config = {"database": database_name}
@@ -68,7 +76,9 @@ def open_database(database_name,
 
     # Connect to the database and get a cursor object
     database = psycopg2.connect(**database_config)
-    cursor = database.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = database.cursor(cursor_factory=psycopg2.extras.DictCursor, name=named_cursor)
+    if itersize is not None:
+        cursor.itersize = itersize
 
     return database, cursor
 
@@ -209,3 +219,66 @@ def to_pandas(cursor):
     data_frame.columns = column_headers
 
     return data_frame
+
+
+def sort_json(input_file, output_file=None, reverse=False, key='created_at', format=None):
+
+    if output_file is None:
+        output_file = input_file
+
+    with open(input_file, "r") as f:
+        json_dict = json.load(f)
+
+    if key == 'created_at':
+        json_dict.sort(reverse=reverse, key=lambda t: twitter_str_to_dt(t[key]))
+    else:
+        json_dict.sort(reverse=reverse, key=lambda t: t[key])
+
+    with open(output_file, 'w') as f:
+        json.dump(json_dict, f)
+
+    return
+
+
+def write_json(input_file, output_file=None):
+
+    return
+
+
+def format_json(input_file, output_file=None, json_format='newlines'):
+
+    if output_file is None:
+        output_file = input_file
+
+    with open(input_file, "r") as f:
+        json_dict = json.load(f)
+
+    if json_format == 'newlines':
+        with open(output_file, "w") as openfile:
+            openfile.write("[\n")
+            for idx, tweet in enumerate(json_dict):
+                json.dump(tweet, openfile)
+                if idx == len(json_dict) - 1:
+                    openfile.write('\n')
+                else:
+                    openfile.write(",\n")
+            openfile.write("]")
+
+    return
+
+
+def sample_json_to_csv(input_directories, number, keys):
+
+    return
+
+
+def int_dict():
+    return defaultdict(int)
+
+
+def set_dict():
+    return defaultdict(set)
+
+
+def dict_dict():
+    return defaultdict(dict)
