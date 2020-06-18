@@ -357,6 +357,103 @@ def membership_statement(input_table, input_schema, input_column,
     return sql_statement, return_values
 
 
-def random_statement(input_table, columns, n):
+def random_statement(table_name, select, percentage=.01, where_statements='', 
+        distinct=None, limit=None):
 
-    return
+    """ Requires you to fill in the dates in a subsequent step.
+        Think about how to do this in a simple way.
+    """
+
+    if select is None:
+        select = sql.SQL('*')
+    elif type(select) is list:
+        select = sql.SQL(', ').join([sql.Identifier(item) for item in select])
+    else:
+        select = sql.Identifier(select)
+    
+    if distinct is None:
+        distinct = sql.SQL('')
+    else:
+        distinct = sql.SQL("""DISTINCT ON ({})""").format(
+            sql.Identifier(distinct))
+
+    if limit is not None:
+        limit_statement = sql.SQL(f'LIMIT {limit}')
+    else:
+        limit_statement = sql.SQL('')        
+
+    sql_statement = sql.SQL("""
+        SELECT {distinct} {select}
+        FROM {table}
+        TABLESAMPLE SYSTEM({percentage})
+        {where_statements}
+        {limit_statement}
+        """).format(select=select, table=sql.SQL(table_name),
+                        percentage=sql.SQL(str(percentage)),
+                        where_statements=sql.SQL(where_statements), 
+                        distinct=distinct,
+                        limit_statement=limit_statement)
+
+    return sql_statement
+
+
+def select_cols(columns):
+    return sql.SQL(', ').join([sql.SQL(item) for item in columns])
+
+
+def random_sample(percent, mode='BERNOULLI'):
+    if percent is None:
+        return sql.SQL('')
+    else:
+        return sql.SQL(f'TABLESAMPLE {mode}({percent})')
+
+
+def date_range(date_range):
+    if date_range is None:
+        return sql.SQL('')
+    if date_range[0] is None:
+        date = date_range[1].strftime("%Y-%m-%d")
+        return sql.SQL(f"created_at < '{date}'")
+    elif date_range[1] is None:
+        date = date_range[0].strftime("%Y-%m-%d")
+        return sql.SQL(f"created_at > '{date}'")
+    else:
+        date_range = [d.strftime('%Y-%m-%d') for d in date_range]
+        return sql.SQL(f"created_at < '{date_range[1]}' \
+            AND created_at > '{date_range[0]}'")
+
+
+def limit(limit):
+    if limit is None:
+        limit = sql.SQL('')
+    else:
+        limit = sql.SQL(f'LIMIT {limit}')
+    return limit
+
+
+def tweet_formats(formats):
+
+    """ TODO: Add mentions
+    """
+
+    if formats == 'all':
+        return sql.SQL('')
+
+    elif formats == 'original':
+        return sql.SQL('in_reply_to_user_id IS NULL \
+        AND retweeted_status_id IS NULL')
+
+    elif formats == 'noretweet':
+        return sql.SQL('retweeted_status_id IS NULL')
+
+    elif formats == 'original_noquote':
+        return sql.SQL('in_reply_to_user_id IS NULL \
+        AND retweeted_status_id IS NULL \
+        AND quoted_status_id IS NULL')
+
+    column_dict = {'reply': 'in_reply_to_user_id',
+            'quote': 'quoted_status_id',
+            'retweet': 'retweeted_status_id'}
+    output_statement = sql.SQL('OR').join([sql.SQL(f'{column_dict[subtype]} IS NOT NULL')])
+    return output_statement
+

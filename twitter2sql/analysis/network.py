@@ -144,7 +144,6 @@ def generate_network_gefx(database_name,
                 print(f'Removed: {remove_count}')
                 print(f'Total: {len(graph.nodes)}')
 
-
             output_network_file = output_network_file.replace('.gexf', f'_{network_pruning}.gexf')
 
             nx.write_gexf(graph, output_network_file)

@@ -10,7 +10,8 @@ from datetime import datetime
 from twitter2sql.core.util import twitter_str_to_dt
 
 
-def get_timelines(api, input_ids, output_directory, stop_condition=3200):
+def get_timelines(api, input_ids, output_directory, stop_condition=3200,
+            append=True):
 
     if not os.path.exists(output_directory):
         os.mkdir(output_directory)
@@ -35,17 +36,20 @@ def get_timelines(api, input_ids, output_directory, stop_condition=3200):
             output_file = os.path.join(output_directory, f'{output_prefix}_{str(uid)}.json')
 
             if stop_condition == 'last_tweet':
-                print(output_file)
                 if not os.path.exists(output_file):
+                    print(output_file)
                     # If it's the first time, just grab the maximum tweets.
                     tweets = get_historic_tweets(api, uid, 3200, t)
-                else:
+                elif append:
+                    print(output_file)
                     # Otherwise read the last tweet and gather from there.
                     # May error if someone modifies the json.
                     with open(output_file, 'r') as f:
                         tweets = json.load(f)
                         last_tweet_date = twitter_str_to_dt(tweets[-1]['created_at'])
                         tweets = get_historic_tweets(api, uid, last_tweet_date, t)
+                else:
+                    tweets = None
             else:
                 tweets = get_historic_tweets(api, uid, stop_condition, t)
 
@@ -84,7 +88,7 @@ def get_timelines(api, input_ids, output_directory, stop_condition=3200):
                                 openfile.write(",\n")
                         openfile.write("]")
 
-            total_tweets += len(tweets)
+                total_tweets += len(tweets)
 
     print(f'{total_tweets} tweets collected.')
 
@@ -107,10 +111,6 @@ def get_historic_tweets(api, uid, stop_condition, progress_bar):
 # Returns the minimum id of the list of tweets (i.e. the id corresponding to the earliest tweet)
 def get_historic_tweets_before_id(api, uid, max_id, stop_condition, progress_bar):
 
-    # List of tweets we've collected so far
-    tweets = []
-    finished = False
-
     # The timeline is returned as pages of tweets (each page has 20 tweets, starting with the 20 most recent)
     # If a cap has been set and our list of tweets gets to be longer than the cap, we'll stop collecting
     iterator_count = 200
@@ -118,31 +118,9 @@ def get_historic_tweets_before_id(api, uid, max_id, stop_condition, progress_bar
     if max_id:
         cursor_args["max_id"] = max_id
 
-    page_num = 0
-
     try:
-        for page in tweepy.Cursor(api.user_timeline, tweet_mode='extended', 
-                    **cursor_args).pages(3200 / iterator_count):
-            # Adding the tweets to the list
-
-            json_tweets = [tweet._json for tweet in page]
-
-            finished, filtered_tweets = check_if_collection_is_finished(json_tweets, stop_condition)
-
-            if finished:
-                # Filter out any older tweets
-                json_tweets = filtered_tweets
-            else:
-                # We get 900 requests per 15-minute window, or 1 request/second, so wait 1 second between each request just to be safe
-                time.sleep(1)
-
-            tweets.extend(json_tweets)
-
-            progress_bar.set_description(f'Tweets: {iterator_count * (page_num + 1)}')
-            page_num += 1
-
-            if finished:
-                break
+        tweets, finished = collect_timeline(api, cursor_args, iterator_count,
+            stop_condition, progress_bar)
 
     except tweepy.error.TweepError as ex:
         # We received a rate limiting error, so wait 15 minutes
@@ -151,9 +129,11 @@ def get_historic_tweets_before_id(api, uid, max_id, stop_condition, progress_bar
             print("rate limited :/")
 
             # Try again
-            return self.get_historic_tweets_before_id(api, uid, max_id)
+            tweets, finished = collect_timeline(api, cursor_args, 
+                    iterator_count, stop_condition, progress_bar)
 
         elif any(code in str(ex) for code in ["401", "404"]):
+            print(ex)
             return (None, True, [])
 
         else:
@@ -168,6 +148,40 @@ def get_historic_tweets_before_id(api, uid, max_id, stop_condition, progress_bar
 
     else:
         return (None, True, [])
+
+
+def collect_timeline(api, cursor_args, iterator_count, stop_condition,
+            progress_bar):
+
+    # List of tweets we've collected so far
+    tweets = []
+    finished = False
+    page_num = 0
+
+    for page in tweepy.Cursor(api.user_timeline, tweet_mode='extended', 
+                **cursor_args).pages(3200 / iterator_count):
+        # Adding the tweets to the list
+
+        json_tweets = [tweet._json for tweet in page]
+
+        finished, filtered_tweets = check_if_collection_is_finished(json_tweets, stop_condition)
+
+        if finished:
+            # Filter out any older tweets
+            json_tweets = filtered_tweets
+        else:
+            # We get 900 requests per 15-minute window, or 1 request/second, so wait 1 second between each request just to be safe
+            time.sleep(1)
+
+        tweets.extend(json_tweets)
+
+        progress_bar.set_description(f'Tweets: {iterator_count * (page_num + 1)}')
+        page_num += 1
+
+        if finished:
+            break
+
+    return tweets, finished
 
 
 def check_if_collection_is_finished(tweets, stop_condition):

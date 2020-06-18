@@ -209,5 +209,12 @@ def generate_suspended_users(database_name,
     return
 
 
+def pull_user_mentions(database_name,
+                db_config_file,
+                tweet_table_name):
+
+    return
+
+
 if __name__ == '__main__':
     pass

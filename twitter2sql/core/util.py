@@ -23,7 +23,7 @@ def open_tweepy_api(twitter_c_key, twitter_c_key_secret,
     #authorize twitter, initialize tweepy
     auth = tweepy.OAuthHandler(twitter_c_key, twitter_c_key_secret)
     auth.set_access_token(twitter_a_key, twitter_a_key_secret)
-    api = tweepy.API(auth)
+    api = tweepy.API(auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
     return api
 
 
@@ -282,3 +282,21 @@ def set_dict():
 
 def dict_dict():
     return defaultdict(dict)
+
+
+def sql_type_dictionary():
+    
+    """ Return a dictionary of PSQL types for typical column names
+        in Twitter2SQL databases. 
+    """
+
+    type_dict = {'user_id': 'bigint',
+    'tweet': 'TEXT',
+    'user_name': 'TEXT',
+    'user_screen_name': 'TEXT',
+    'in_reply_to_status_id': 'bigint',
+    'created_at': 'timestamptz',
+    'in_reply_to_user_screen_name': 'TEXT',
+    'in_reply_to_user_id': 'bigint'}
+
+    return type_dict
