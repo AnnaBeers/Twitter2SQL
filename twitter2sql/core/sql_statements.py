@@ -423,6 +423,33 @@ def date_range(date_range):
             AND created_at > '{date_range[0]}'")
 
 
+def in_values(col, values):
+
+    """ Requires you to fill in the dates in a subsequent step.
+        Think about how to do this in a simple way.
+    """
+
+    # This is a bit suspect.
+    value_string = ''
+    for item in values:
+        value_string += f'{item},'
+    value_string = sql.SQL(value_string[:-1])
+
+    sql_statement = sql.SQL("""{col} in ({values})
+            """).format(values=value_string,
+            col=sql.SQL(col))
+
+    return sql_statement
+
+
+def format_conditions(conditions, join_str=' AND '):
+
+    if conditions:
+        return sql.SQL('WHERE ') + sql.SQL(join_str).join(conditions)
+    else:
+        return sql.SQL('')
+
+
 def limit(limit):
     if limit is None:
         limit = sql.SQL('')
