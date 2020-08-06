@@ -470,6 +470,15 @@ def tweet_formats(formats):
         return sql.SQL('in_reply_to_user_id IS NULL \
         AND retweeted_status_id IS NULL')
 
+    elif formats == 'reply':
+        return sql.SQL('in_reply_to_user_id IS NOT NULL')
+
+    elif formats == 'quote':
+        return sql.SQL('quoted_status_user_id IS NOT NULL')
+
+    elif formats == 'retweet':
+        return sql.SQL('retweeted_status_user_id IS NOT NULL')
+
     elif formats == 'noretweet':
         return sql.SQL('retweeted_status_id IS NULL')
 
@@ -484,3 +493,21 @@ def tweet_formats(formats):
     output_statement = sql.SQL('OR').join([sql.SQL(f'{column_dict[subtype]} IS NOT NULL')])
     return output_statement
 
+
+def count_rows(table, conditions=None, estimate=False):
+
+    if conditions is None:
+        conditions = sql.SQL('')
+
+    if estimate:
+        return sql.SQL("""
+        SELECT reltuples::bigint AS estimate
+        FROM   pg_class
+        WHERE  oid = '{table}'::regclass;
+        """).format(table=sql.SQL(table))
+    else:
+        return sql.SQL("""
+            SELECT count(*) AS exact_count FROM {table};
+            """).format(table=sql.SQL(table))
+
+    return

@@ -8,9 +8,11 @@ from pprint import pprint
 from datetime import datetime, timezone, timedelta
 from tqdm import tqdm
 from collections import defaultdict
+from itertools import combinations
 
 from twitter2sql.core.util import open_database, save_to_csv, \
         to_list_of_dicts, to_pandas, set_dict, int_dict, dict_dict
+from twitter2sql.core import sql_statements
 
 
 def generate_network_gefx(database_name,
@@ -22,8 +24,11 @@ def generate_network_gefx(database_name,
                 input_network_file=None,
                 dict_pkl_file=None,
                 users_pkl_file=None,
+                mutual_pkl_file=None,
                 table_name='tweets',
                 connection_type='retweet',
+                link_type='mutual',
+                conditions=[],
                 attributes=None,
                 label='screen_name',
                 connection_limit=10,
@@ -33,56 +38,65 @@ def generate_network_gefx(database_name,
                 mode='networkx',
                 overwrite=False):
 
+    # Type of tweet requested.
     if connection_type not in ['retweet', 'quote', 'reply', 'mention', 'all']:
         raise ValueError(f'connection_type must be retweet, quote, reply, mention, all, \
                 not, {connection_type}')
 
-    output_columns = []
+    # This is for output types.
+    if mode not in ['networkx', 'dynamic']:
+        raise ValueError(f'connection_type must be networkx, dynamic, \
+                not, {mode}')
+
+    output_columns = set()
     if attributes is not None:
         output_columns += attributes
-    for column in ['user_id', 'user_name', 'user_screen_name']:
-        # Use a set, maybe?
-        if column not in output_columns:
-            output_columns += [column]
+    output_columns.update(['user_id', 'user_name', 'user_screen_name'])
 
+    tweet_type_condition = sql_statements.tweet_formats(connection_type)
+    where_statement = sql_statements.format_conditions([tweet_type_condition] + conditions)
+
+    # Wonder if this could be exported to a util function.
     if connection_type == 'retweet':
-        output_columns += ['retweeted_status_user_id', 'retweeted_status_user_screen_name']
+        output_columns.update(['retweeted_status_user_id', 'retweeted_status_user_screen_name'])
         connect_column = 'retweeted_status_user_id'
         connect_column_screen_name = 'retweeted_status_user_screen_name'
-        where_statement = sql.SQL("""WHERE retweeted_status_user_id IS NOT NULL""")
     elif connection_type == 'quote':
-        output_columns += ['quoted_status_user_id', 'quoted_status_user_screen_name']
+        output_columns.update(['quoted_status_user_id', 'quoted_status_user_screen_name'])
         connect_column = 'quoted_status_user_id'
         connect_column_screen_name = 'quoted_status_user_screen_name'
-        where_statement = sql.SQL("""WHERE quoted_status_user_id IS NOT NULL""")
     elif connection_type == 'reply':
-        output_columns += ['in_reply_to_user_id', 'in_reply_to_user_screen_name']
+        output_columns.update(['in_reply_to_user_id', 'in_reply_to_user_screen_name'])
         connect_column = 'in_reply_to_user_id'
         connect_column_screen_name = 'in_reply_to_user_screen_name'
-        where_statement = sql.SQL("""WHERE in_reply_to_user_id IS NOT NULL""")
     elif connection_type == 'mention':
         raise NotImplementedError('Mentions not yet implemented')
-        where_statement = sql.SQL("""WHERE in_reply_to_user_id IS NOT NULL""")
     elif connection_type == 'all':
         output_columns += ['quoted_status_user_id', 'quoted_status_user_screen_name', 
                 'retweeted_status_user_id', 'retweeted_status_user_screen_name',
                 'in_reply_to_user_id', 'in_reply_to_user_screen_name']
-        where_statement = sql.SQL("""WHERE in_reply_to_user_id IS NOT NULL
-                    OR quoted_status_user_id IS NOT NULL
-                    OR retweeted_status_user_id IS NOT NULL""")
 
+    graph = None
     if not overwrite and load_from_gexf and os.path.exists(input_network_file):
         graph = nx.read_gexf(input_network_file)
     elif not overwrite and load_from_pkl and os.path.exists(dict_pkl_file) and os.path.exists(users_pkl_file):
-        graph = None
         print('Loading input dict')
         with open(dict_pkl_file, 'rb') as openfile:
             connections_dict = pickle.load(openfile)
         print('Loading user dict')
         with open(users_pkl_file, 'rb') as openfile:
             user_dict = pickle.load(openfile)
+        if mutual_pkl_file is not None and link_type == 'mutual':
+            if os.path.exists(mutual_pkl_file):
+                print('Loading mutual connections dict')
+                with open(mutual_pkl_file, 'rb') as openfile:
+                    mutual_dict = pickle.load(openfile)
+            else:
+                mutual_dict = None
+        else:
+            mutual_dict = None
+
     else:
-        graph = None
         connections_dict, user_dict, = stream_connection_data(database_name, 
                 db_config_file, output_network_file, output_columns,
                 connect_column, connect_column_screen_name, where_statement,
@@ -94,27 +108,10 @@ def generate_network_gefx(database_name,
     if mode == 'networkx':
         if graph is None:
             graph = process_dicts_nx(connections_dict, user_dict, connect_column,
-                connect_column_screen_name, connection_limit)
+                connect_column_screen_name, connection_limit, link_type, mutual_dict)
             nx.write_gexf(graph, output_network_file)
 
         if network_pruning:
-
-            # mgraph = nx.Graph()
-            # for node in tqdm(graph.nodes):
-            #     in_connects = list(graph.in_edges(node))
-            #     for n1 in tqdm(in_connects):
-            #         n1 = n1[0]
-            #         for n2 in in_connects:
-            #             n2 = n2[0]
-            #             if n1 == n2:
-            #                 continue
-            #             mgraph.add_edges_from([(n1, n2)])
-            #             mgraph.add_node(n1, label=graph.nodes[n1]['label'])
-            #             mgraph.add_node(n2, label=graph.nodes[n2]['label']) 
-
-            # output_mutual_file = output_network_file.replace('.gexf', f'_mutual.gexf')
-            # nx.write_gexf(mgraph, output_mutual_file)
-            # nx.write_gexf(graph, output_network_file)
 
             components = list(nx.weakly_connected_components(graph))
             for component in components:
@@ -147,7 +144,8 @@ def generate_network_gefx(database_name,
             output_network_file = output_network_file.replace('.gexf', f'_{network_pruning}.gexf')
 
             nx.write_gexf(graph, output_network_file)
-    else:
+
+    elif mode == '':
         network_data = process_dicts(connections_dict, user_dict, connect_column,
                 connect_column_screen_name, connection_limit)
 
@@ -197,7 +195,6 @@ def stream_connection_data(database_name,
         """).format(table_name=sql.SQL(table_name),
                 select=select_columns, where_statement=where_statement,
                 limit_statement=limit_statement)
-
     cursor.execute(user_statement)
     
     connections_dict = defaultdict(dict_dict)
@@ -241,39 +238,71 @@ def stream_connection_data(database_name,
 
 
 def process_dicts(input_dict, user_dict, connect_column,
-            connect_column_screen_name, connection_limit=20):
+            connect_column_screen_name, connection_limit=20,
+            connection_mode='direct'):
 
-    output_data = []
-    for connecting_user, connecting_dict in input_dict.items():
-        for connected_user, connected_dict in connecting_dict.items():
-            if connected_dict['count'] >= connection_limit:
-                data_dict = {key: value for key, value in connected_dict.items() if key != 'count'}
-                data_dict['user_id'] = connecting_user
-                data_dict['connect_id'] = connected_user
-                data_dict['user_screen_name'] = next(iter(user_dict[connecting_user]['screen_name']))
-                data_dict['connect_screen_name'] = next(iter(user_dict[connected_user]['screen_name']))
-                data_dict['weight'] = connected_dict['count']
-                output_data += [data_dict]
-    
+    if connection_mode == 'direct':
+        output_data = []
+        for connecting_user, connecting_dict in input_dict.items():
+            for connected_user, connected_dict in connecting_dict.items():
+                if connected_dict['count'] >= connection_limit:
+                    data_dict = {key: value for key, value in connected_dict.items() if key != 'count'}
+                    data_dict['user_id'] = connecting_user
+                    data_dict['connect_id'] = connected_user
+                    data_dict['user_screen_name'] = next(iter(user_dict[connecting_user]['screen_name']))
+                    data_dict['connect_screen_name'] = next(iter(user_dict[connected_user]['screen_name']))
+                    data_dict['weight'] = connected_dict['count']
+                    output_data += [data_dict]
+        
+    elif connection_mode == 'mutual':
+
+        raise NotImplementedError
+        output_data = None
+
     return output_data
 
 
 def process_dicts_nx(input_dict, user_dict, connect_column,
-            connect_column_screen_name, connection_limit=20):
+            connect_column_screen_name, connection_limit=20,
+            connection_mode='mutual', mutual_dict=None):
 
     graph = nx.DiGraph()
-    for connecting_user, connecting_dict in tqdm(input_dict.items()):
-        for connected_user, connected_dict in connecting_dict.items():
-            if connected_dict['count'] >= connection_limit:
-                if connecting_user == connected_user:
-                    continue
-                graph.add_edges_from([(connecting_user, connected_user)])
-                # graph.add_weighted_edges_from([(connecting_user, connected_user, connected_dict['count'])])
-                for key, value in connected_dict.items():
-                    if key != 'count':
-                        graph[connecting_user][connected_user][key] = value
-                graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
-                graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name']))) 
+
+    if connection_mode == 'direct':
+
+        for connecting_user, connecting_dict in tqdm(input_dict.items()):
+            for connected_user, connected_dict in connecting_dict.items():
+                if connected_dict['count'] >= connection_limit:
+                    if connecting_user == connected_user:
+                        continue
+                    graph.add_edges_from([(connecting_user, connected_user)])
+                    # graph.add_weighted_edges_from([(connecting_user, connected_user, connected_dict['count'])])
+                    for key, value in connected_dict.items():
+                        if key != 'count':
+                            graph[connecting_user][connected_user][key] = value
+                    graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
+                    graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name']))) 
+
+    elif connection_mode == 'mutual':
+
+        if mutual_dict is None:
+            mutual_dict = defaultdict(int_dict)
+            for connecting_user, connecting_dict in tqdm(input_dict.items()):
+                connected_users = list(connecting_dict.keys())
+                pairs = combinations(connected_users, 2)
+                for pair in pairs:
+                    if pair[1] in mutual_dict[pair[0]].keys():
+                        pair = [pair[1], pair[0]]
+                    mutual_dict[pair[0]][pair[1]] += 1
+
+        for connecting_user, connecting_dict in tqdm(mutual_dict.items()):
+            for connected_user, count in connecting_dict.items():
+                if count >= connection_limit:
+                    graph.add_edges_from([(connecting_user, connected_user)])
+                    graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
+                    graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name'])))
+
+        pass
 
     return graph
 
@@ -374,10 +403,6 @@ def add_edge(item, nodes, edges,
         edge_node.set('end', (item[time_col] + timedelta(seconds=1)).isoformat(timespec='seconds'))
 
     return node, edge_node
-
-
-# start=datetime.strptime(item['created_ts'], '%a %b %d %X %z %Y').isoformat(timespec='seconds'), #Fri Jul 27 07:52:57 +0000 2018
-# end=(datetime.strptime(item['created_ts'], '%a %b %d %X %z %Y') + timedelta(seconds=1)).isoformat(timespec='seconds')
 
 
 if __name__ == '__main__':
