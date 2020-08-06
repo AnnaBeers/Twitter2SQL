@@ -15,6 +15,7 @@ def analyze_codes(input_data,
             lead_code=None,
             code_hierarchy=None,
             exclude_codes=['Notes'],
+            exclude_values=['Unclear'],
             code_groups=None):
 
     if not os.path.exists(output_directory):
@@ -42,7 +43,7 @@ def analyze_codes(input_data,
         for col in list(codebook):
             code_dict[col] = list(codebook[col].dropna().astype(str))
 
-    # This is really dumb.
+    # This is really dumb and complicated, sorry.
     codes_only = []
     codes_coders = []
     past_coders = False
@@ -80,29 +81,32 @@ def analyze_codes(input_data,
 
             for idx, coder1 in enumerate(coders):
                 for coder2 in coders[idx + 1:]:
-                    # print(code, coder1, coder2)
+
                     output_row['Combined Pair'] = f'{coder1}_{coder2}'
                     output_row['Pair 1'] = coder1
                     output_row['Pair 2'] = coder2
 
                     df1 = process_codesheet(coder1, coder2)
                     df2 = process_codesheet(coder2, coder1)
-
                     combined = pd.concat([df1, df2], axis=1)
+
+                    # Remove null rows that have not yet been coded, according to the "lead code" (i.e. first code).
                     combined = combined[~(combined[f'{lead_code}_{coder1}'].isna()) & ~(combined[f'{lead_code}_{coder2}'].isna())]
 
                     col1 = f'{code}_{coder1}'
                     col2 = f'{code}_{coder2}'
                     cols = [col1, col2]
 
-                    pd.set_option('display.max_rows', 100)
+                    # Remove 'Unclear' and other excluded rows.
+                    combined = combined[~(combined[col1].isin(exclude_values)) & ~(combined[col2].isin(exclude_values))]
 
-                    # Basic
+                    # Basic Agreement
                     output_row, count, agreement, c_kappa = calculate_agreement_scores(output_row, combined, col1, col2, code_dict, code, prefix='')
 
                     # Partial Agreement
                     if code in multi_select_codes:
                         if code in code_hierarchy:
+                            # Not generalizable to other data, obviously
                             condition_code = code_hierarchy[code]
                             h_data = combined[(combined[f'{condition_code}_{coder1}'] != 'No Theory') & (combined[f'{condition_code}_{coder2}'] != 'No Theory')]
                             p_output_row, p_count, p_agreement, p_kappa = calculate_partial_agreement_scores(output_row, h_data, col1, col2, code_dict, code, prefix='Partial_')
@@ -110,13 +114,13 @@ def analyze_codes(input_data,
                             p_output_row, p_count, p_agreement, p_kappa = calculate_partial_agreement_scores(output_row, combined, col1, col2, code_dict, code, prefix='Partial_')
 
                     # Conditional Agreement
-                    if code in code_hierarchy:
-                        # Fix this to be generalizable                        
+                    if code in code_hierarchy:                    
                         h_output_row, h_count, h_agreement, h_kappa = calculate_agreement_scores(output_row, h_data, col1, col2, code_dict, code, prefix='Conditional_')
                     else:
                         output_row['Conditional_Agreement'] = None
                         output_row['Conditional_Cohen_Kappa'] = None
 
+                    # Grouped Agreement
                     if code in code_groups:
                         group_dict = code_groups[code]
                         for key, item in group_dict.items():
@@ -124,18 +128,6 @@ def analyze_codes(input_data,
                         output_categories = set([val for val in group_dict.values()])
                         output_dict = {code: list(output_categories)}
                         g_output_row, g_count, g_agreement, g_kappa = calculate_agreement_scores(output_row, combined, col1, col2, output_dict, code, prefix='Grouped_')
-
-
-                    # Grouped Agreement
-
-
-                    # Grouped Agreement
-
-
-                    # if c_kappa < .2 and count > 10:
-                    #     print(code_dict[code])
-                    #     print(agreement, c_kappa)
-                    #     print(subdata)
 
                     pprint(output_row)
                     writer.writerow(output_row)
@@ -145,10 +137,11 @@ def analyze_codes(input_data,
 
 def calculate_agreement_scores(output_row, df, col1, col2, code_dict, code, prefix=''):
 
+    # Total Rows
     count = df.shape[0]
     output_row[f'{prefix}N'] = count
 
-    # Basic Agreement
+    # Agreement
     same_count = df[df[col1] == df[col2]].shape[0]
     agreement = same_count / count
     output_row[f'{prefix}Agreement'] = agreement
@@ -162,10 +155,11 @@ def calculate_agreement_scores(output_row, df, col1, col2, code_dict, code, pref
 
 def calculate_partial_agreement_scores(output_row, df, col1, col2, code_dict, code, prefix=''):
 
+    # Total Rows
     count = df.shape[0]
     output_row[f'{prefix}N'] = count
 
-    # This is so messed up.
+    # This is so messed up. Means to an end.
     partial_col1 = []
     partial_col2 = []
     same_count = 0
@@ -179,7 +173,7 @@ def calculate_partial_agreement_scores(output_row, df, col1, col2, code_dict, co
         partial_col1 += [vals1]
         partial_col2 += [vals2]
 
-    # Basic Agreement
+    # Agreement
     agreement = same_count / count
     output_row[f'{prefix}Agreement'] = agreement
 
