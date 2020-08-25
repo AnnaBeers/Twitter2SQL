@@ -1,54 +1,68 @@
-""" Scripts for analyzing coded data stored in Google Sheets. 
+""" Scripts for analyzing coded data stored in Google Sheets.
     Currently mostly works for one application.
 """
 
-import xlsxwriter
 import os
+import csv
 import random
+
+from pprint import pprint
+from collections import Counter, defaultdict, namedtuple
+from itertools import combinations
+
+import xlsxwriter
 import pandas as pd
 import numpy as np
-import csv
 
 from sklearn.metrics import cohen_kappa_score, confusion_matrix
-from pprint import pprint
 from tqdm import tqdm
-from collections import Counter, defaultdict
 
 
-def analyze_codes(input_data, 
-            coders,
-            output_directory,
-            suffix='',
-            multi_select_codes=None,
-            lead_code=None,
-            code_hierarchy=None,
-            exclude_codes=['Notes'],
-            exclude_values=['Unclear'],
-            arbitration_columns=None,
-            code_groups=None,
-            max_raters=2,
-            aggregate_statistics=True,
-            confusion_matrices=True,
-            pairwise_statistics=True,
-            arbitration=True,
-            verbose=True):
+def analyze_codes(
+        input_data,
+        coders,
+        output_directory,
+        suffix='',
+        multi_select_codes=None,
+        lead_code=None,
+        code_hierarchy=None,
+        exclude_codes=None,
+        exclude_values=None,
+        arb_cols=None,
+        code_groups=None,
+        max_raters=2,
+        aggregate_stats=True,
+        confusion_matrices=True,
+        pairwise_stats=True,
+        arb=True,
+        individual_stats=True,
+        discussion=False,
+        verbose=True):
 
     """ Input xlsx is expected to have the following format:
-        1. A 'Codebook' sheet with vertical columns of titled codes.
+        1. A 'Codebook' sheet with vertical cols of titled codes.
         2. Coding sheets per coder titled 'Tweets_{coder}'
         3. Any number of unrelated sheets.
 
         Each coding sheet is expected to have, in order:
-        1. Any number of data columns
-        2. TRUE/FALSE coder columns = to # of coders.
-        3. Code columns
+        1. Any number of data cols
+        2. TRUE/FALSE coder cols = to # of coders.
+        3. Code cols
+
     """
+
+    if exclude_codes is None:
+        exclude_codes = ['Notes']
+    if exclude_values is None:
+        exclude_values = ['Unclear']
 
     code_level_stats = os.path.join(output_directory, f'Code_Level_Stats{suffix}.csv')
     confusion_matrix_stats = os.path.join(output_directory, f'Confusion_Matrices{suffix}.csv')
     confusion_matrix_image_dir = os.path.join(output_directory, f'Confusion_Matrices{suffix}')
-    arbitration_sheet = os.path.join(output_directory, f'Arbitration{suffix}.csv')
+    individual_csv = os.path.join(output_directory, f'Individual_Statistics{suffix}.csv')
+    arb_csv = os.path.join(output_directory, f'Arbitration{suffix}.csv')
     output_xlsx = os.path.join(output_directory, f'Coding_Analysis{suffix}.xlsx')
+    discussion_xlsx = os.path.join(output_directory, f'Discussion{suffix}.xlsx')
 
     if not os.path.exists(output_directory):
         os.mkdir(output_directory)
@@ -73,7 +87,9 @@ def analyze_codes(input_data,
         for coder in tqdm(coders):
             for name in raw_xlsx.sheet_names:
                 if coder in name:
-                    data_dict[coder] = raw_xlsx.parse(name, keep_default_na=False, na_values=[''])
+                    df = raw_xlsx.parse(name, keep_default_na=False, na_values=[''])
+                    df = df.dropna(subset=['Tweet'])
+                    data_dict[coder] = df
 
         code_dict = {}
         codebook = raw_xlsx.parse('Codebook', keep_default_na=False, na_values=[''])
@@ -87,7 +103,6 @@ def analyze_codes(input_data,
     """
 
     codes_only = []
-    codes_coders = []
     past_coders = False
     for colname in list(data_dict[coders[0]]):
         if colname in coders:
@@ -95,7 +110,6 @@ def analyze_codes(input_data,
         if past_coders:
             if colname not in coders:
                 codes_only += [colname]
-            codes_coders += [colname]
     analysis_codes = [x for x in codes_only if x not in exclude_codes]
 
     if lead_code is None:
@@ -104,89 +118,113 @@ def analyze_codes(input_data,
     if max_raters is None:
         max_raters = len(coders)
 
-    """ 3. Define Metrics
+    """ 3. Write out data.
     """
 
-    code_header = ['Combined Pair', 'Pair 1', 'Pair 2', 'Code']
+    with open(code_level_stats, 'w') as codefile, \
+            open(confusion_matrix_stats, 'w') as confusionfile, \
+            open(arb_csv, 'w') as arbfile, \
+            open(individual_csv, 'w') as indivfile, \
+            xlsxwriter.Workbook(output_xlsx) as workbook, \
+            xlsxwriter.Workbook(discussion_xlsx) as dworkbook:
 
-    extra_measures = ['', 'Conditional_', 'Partial_', 'Grouped_']
-    for extra in extra_measures:
-        code_header += [f'{extra}N', f'{extra}Agreement', f'{extra}Cohen_Kappa']
+        # First figure out filewriting (ugh)...
+        stats_sheet, confusion_sheet, arb_sheets, individual_sheet, \
+            writer, confusion_writer, arb_writer, individual_writer, \
+            code_header, individual_header = format_filewriters(
+                workbook, arb_cols, coders + ['Discussion'],
+                codes_only, data_dict, codefile, arbfile, confusionfile,
+                indivfile)
 
+        confusion_rownum, individual_rownum, stats_rownum = 0, 1, 1
+        arb_rownums = {coder: 1 for coder in coders}
 
-    """ 4. Write out data.
-    """
+        # Calculate individual ratios
+        if individual_stats:
+            process_individual_stats(
+                individual_writer, individual_sheet, individual_rownum,
+                data_dict, lead_code, analysis_codes, multi_select_codes,
+                individual_header)
 
-    # First figure out XLSX writing...
-    with xlsxwriter.Workbook(output_xlsx) as workbook:
+        # Get scores for the aggregate data first..
+        if aggregate_stats:
+            coder1, coder2 = '0', '1'
 
-        statistics_worksheet, confusion_worksheet, arbitration_worksheets, arbitration_header = format_xlsx(workbook, 
-                code_header, arbitration_columns, coders + ['Discussion'], codes_coders, codes_only, data_dict)
+            combined = process_aggregate_codesheet(data_dict, analysis_codes, lead_code)
+            output_row = {'Combined Pair': 'All'}
 
-        confusion_rownum, statistics_rownum = 0, 1
-        arbitration_rownums = {coder: 1 for coder in coders}
+            stats_rownum, confusion_rownum = write_data(
+                output_row, combined, coder1, coder2, code_dict,
+                code_hierarchy, multi_select_codes, code_groups,
+                lead_code, exclude_values, confusion_matrices,
+                confusion_rownum, confusion_writer, confusion_sheet,
+                analysis_codes, stats_rownum, stats_sheet, code_header,
+                writer)
 
-        # Then figure out CSV writing...
-        with open(code_level_stats, 'w') as codefile, open(confusion_matrix_stats, 'w') as confusionfile, \
-                    open(arbitration_sheet, 'w') as arbfile:
+        # Calculate scores for each coding pair.
+        if pairwise_stats:
+            for idx, (coder1, coder2) in enumerate(combinations(coders, 2)):
 
-            arb_writer = csv.writer(arbfile, delimiter=',')
-            arb_writer.writerow(arbitration_header)
+                combined = process_pair_codesheet(
+                    data_dict, coders, analysis_codes, coder1, coder2, lead_code)
+                output_row = {
+                    'Combined Pair': f'{coder1}_{coder2}',
+                    'Pair 1': coder1, 'Pair 2': coder2}
 
-            writer = csv.DictWriter(codefile, code_header, delimiter=',')
-            writer.writeheader()
+                stats_rownum, confusion_rownum = write_data(
+                    output_row, combined, coder1, coder2, code_dict,
+                    code_hierarchy, multi_select_codes, code_groups,
+                    lead_code, exclude_values, False,
+                    confusion_rownum, confusion_writer, confusion_sheet,
+                    analysis_codes, stats_rownum, stats_sheet, code_header,
+                    writer)
 
-            confusion_writer = csv.writer(confusionfile, delimiter=',')
+        # Then write out rows for arb
+        if arb:
+            write_arb(
+                arb_writer, data_dict, lead_code, arb_cols,
+                codes_only, arb_sheets, arb_rownums)
 
+        if discussion:
+            write_discussion(dworkbook, data_dict, lead_code, codes_only, coders, analysis_codes)
 
-            # Get scores for the aggregate data first..
-            if aggregate_statistics:
-                coder1, coder2 = '_0', '_1'
-
-                combined = process_aggregate_codesheet(data_dict, codes_coders, analysis_codes, lead_code)
-                for code in tqdm(analysis_codes):
-                    output_row = {'Combined Pair': 'All', 'Code': code}
-                    output_row, confusion = calculate_all_scores(output_row, combined, coder1, coder2, code_dict,
-                            code, code_hierarchy, multi_select_codes, code_groups, lead_code, exclude_values)
-
-                    if confusion_matrices:
-                        confusion_rownum = write_confusion(confusion_writer, confusion_worksheet, confusion_rownum,
-                                confusion, code, code_dict)
-
-                    list_row = [output_row[x]  if x in output_row else '' for x in code_header]
-                    statistics_rownum = write_xlsx_row(statistics_worksheet, list_row, statistics_rownum)
-                    writer.writerow(output_row)
-
-            # Calculate scores for each coding pair.
-            if pairwise_statistics:
-                for idx, coder1 in enumerate(coders):
-                    for coder2 in coders[idx + 1:]:
-
-                        df1 = process_pair_codesheet(data_dict, codes_coders, analysis_codes, coder1, coder2)
-                        df2 = process_pair_codesheet(data_dict, codes_coders, analysis_codes, coder2, coder1)
-                        combined = pd.concat([df1, df2], axis=1)
-
-                        for code in tqdm(analysis_codes):
-                            output_row = {'Combined Pair': f'{coder1}_{coder2}', 'Pair 1': coder1, 'Pair 2': coder2,
-                                    'Code': code}
-                            output_row['Code'] = code
-                            output_row, confusion = calculate_all_scores(output_row, combined, f'_{coder1}',
-                                    f'_{coder2}', code_dict, code, code_hierarchy, 
-                                    multi_select_codes, code_groups, lead_code, exclude_values)
-
-                            list_row = [output_row[x]  if x in output_row else '' for x in code_header]
-                            statistics_rownum = write_xlsx_row(statistics_worksheet, list_row, statistics_rownum)
-                            writer.writerow(output_row)
-
-            # Then write out rows for arbitration
-            if arbitration and True:
-                write_arbitration(arb_writer, data_dict, lead_code, arbitration_columns, \
-                        codes_only, arbitration_worksheets, arbitration_rownums)
-
-    return
+    return output_xlsx
 
 
-def write_xlsx_row(sheet, row, rownum):
+def write_data(
+        output_row, combined, coder1, coder2, code_dict,
+        code_hierarchy, multi_select_codes, code_groups,
+        lead_code, exclude_values, confusion_matrices,
+        confusion_rownum, confusion_writer, confusion_sheet,
+        analysis_codes, stats_rownum, stats_sheet, code_header,
+        writer):
+
+    for code in tqdm(analysis_codes):
+        output_row['Code'] = code
+        output_row = calculate_all_scores(
+            output_row, combined, coder1, coder2, code_dict,
+            code, code_hierarchy, multi_select_codes, code_groups,
+            lead_code, exclude_values)
+
+        # pprint(output_row)
+
+        if confusion_matrices:
+            confusion_rownum = write_confusion(
+                combined, confusion_writer, confusion_sheet, confusion_rownum,
+                code, coder1, coder2, code_dict, multi_select_codes)
+
+        stats_rownum = write_xlsx_row(
+            stats_sheet, output_row,
+            stats_rownum, code_header)
+        writer.writerow(output_row)
+
+    return stats_rownum, confusion_rownum
+
+
+def write_xlsx_row(sheet, row, rownum, code_header=None):
+
+    if isinstance(row, dict):
+        row = [row[x] if x in row else '' for x in code_header]
 
     sheet.write_row(rownum, 0, row)
     rownum += 1
@@ -194,33 +232,300 @@ def write_xlsx_row(sheet, row, rownum):
     return rownum
 
 
-def format_xlsx(workbook, code_header, arbitration_columns, 
-            coders, codes_coders, codes_only, data_dict):
+def format_filewriters(
+        workbook, arb_cols,
+        coders, codes_only, data_dict,
+        codefile, arbfile, confusionfile, indivfile):
 
-    statistics_worksheet = workbook.add_worksheet('Agreement_Statistics')
-    statistics_worksheet.write_row(0, 0, code_header)
+    # XLSX Sheet Creation
 
-    confusion_worksheet = workbook.add_worksheet('Confusion_Statistics')
+    # Agreement Statistics
+    code_header = ['Combined Pair', 'Pair 1', 'Pair 2', 'Code']
 
-    if arbitration_columns is None:
-        arbitration_header = list(data_dict[coders[0]])
+    extra_measures = ['', 'Conditional_', 'Partial_', 'Grouped_']
+    for extra in extra_measures:
+        code_header += [f'{extra}N', f'{extra}Agreement', f'{extra}Cohen_Kappa']
+
+    stats_sheet = workbook.add_worksheet('Agreement_Statistics')
+    stats_sheet.write_row(0, 0, code_header)
+
+    # Individual Statistics
+    individual_header = ['Coder', 'Code', 'Value', 'N', 'Percent', 'Multi_N', 'Multi_Percent']
+    individual_sheet = workbook.add_worksheet('Individual_Statistics')
+    individual_sheet.write_row(0, 0, individual_header)
+
+    # Confusion Matrices
+    confusion_sheet = workbook.add_worksheet('Confusion_Statistics')
+
+    # Arbitration
+    if arb_cols is None:
+        arb_header = list(data_dict[coders[0]])
     else:
-        arbitration_header = [x for x in list(data_dict[coders[0]]) if x in arbitration_columns]
+        arb_header = [x for x in list(data_dict[coders[0]]) if x in arb_cols]
 
-    arbitration_header = arbitration_header + ['Coder', 'Arbitrate?'] + codes_only
-    arbitration_worksheets = {}
+    arb_header = arb_header + ['Coder', 'Arbitrate?'] + codes_only
+    arb_sheets = {}
     for coder in coders:
-        arbitration_worksheets[coder] = workbook.add_worksheet(f'Arbitration_{coder}')
-        arbitration_worksheets[coder].write_row(0, 0, arbitration_header)
+        arb_sheets[coder] = workbook.add_worksheet(f'Arbitration_{coder}')
+        arb_sheets[coder].write_row(0, 0, arb_header)
 
-    return statistics_worksheet, confusion_worksheet, arbitration_worksheets, arbitration_header
+    # Discussion
+
+    # CSV Headers and Writers
+    arb_writer = csv.writer(arbfile, delimiter=',')
+    arb_writer.writerow(arb_header)
+
+    writer = csv.DictWriter(codefile, code_header, delimiter=',')
+    writer.writeheader()
+
+    individual_writer = csv.DictWriter(indivfile, individual_header, delimiter=',')
+    individual_writer.writeheader()
+
+    confusion_writer = csv.writer(confusionfile, delimiter=',')
+
+    return stats_sheet, confusion_sheet, arb_sheets, individual_sheet, \
+        writer, confusion_writer, arb_writer, individual_writer, code_header, \
+        individual_header
 
 
-def write_arbitration(writer, data_dict, lead_code, arbitration_columns, 
-            codes_only, arbitration_worksheets, arbitration_rownums):
+def process_aggregate_codesheet(data_dict, analysis_codes, lead_code):
+
+    # Get all codes from coders
+    all_dfs = []
+    for coder, data in data_dict.items():
+        df = data[analysis_codes]
+        all_dfs += [df]
+
+    # Fill in that dataframe with the matching codes from coders
+    coding_array = []
+    sample_df = df
+    for index in tqdm(range(sample_df.shape[0])):
+
+        row_vals = []
+        for df in all_dfs:
+            row = df.iloc[index]
+            if not pd.isnull(row[lead_code]):
+                row_vals += row.values.tolist()
+        row_vals += (len(all_dfs) * len(analysis_codes) - len(row_vals)) * [np.nan]
+        coding_array += [row_vals]
+
+    colnames = []
+    for i in range(len(all_dfs)):
+        colnames += [f'{code}_{i}' for code in analysis_codes]
+
+    combined_df = pd.DataFrame(coding_array, columns=colnames)
+    combined_df = remove_bad_rows(combined_df, '0', '1', lead_code)
+
+    return combined_df
+
+
+def process_pair_codesheet(data_dict, coders, analysis_codes, coder1, coder2, lead_code):
+
+    dfs = []
+    for coder, pair_coder in [[coder1, coder2], [coder2, coder1]]:
+        df = data_dict[coder][coders + analysis_codes]
+        df = df.astype({c: 'bool' for c in coders})
+        print(df)
+        print(coder, pair_coder)
+        print(df.shape)
+        df = df[(df[coder]) & (df[pair_coder])][analysis_codes]
+        df = df.rename(columns={x: f'{x}_{coder}' for x in list(df)})
+        dfs += [df]
+        
+    combined_df = pd.concat(dfs, axis=1)
+    combined_df = remove_bad_rows(combined_df, coder1, coder2, lead_code)
+
+    return combined_df
+
+
+def remove_bad_rows(df, coder1, coder2, lead_code):
+
+    """ Modify this to work for more than 2 coders with df.query
+    """
+
+    # Remove null rows that have not yet been coded, according to the "lead code" (i.e. first code).
+    df = df[~(df[f'{lead_code}_{coder1}'].isna()) & ~(df[f'{lead_code}_{coder2}'].isna())]
+
+    return df
+
+
+def calculate_all_scores(
+        output_row, df, coder1, coder2, code_dict, code, code_hierarchy,
+        multi_select_codes, code_groups, lead_code, exclude_values):
+
+    col1 = f'{code}_{coder1}'
+    col2 = f'{code}_{coder2}'
+
+    # Remove 'Unclear' and other excluded rows.
+    df = df[~(df[col1].isin(exclude_values)) & ~(df[col2].isin(exclude_values))]
+
+    # Basic Agreement
+    output_row = calculate_agreement_scores(
+        output_row, df,
+        col1, col2, code_dict, code, prefix='')
+
+    # Partial Agreement
+    if code in multi_select_codes:
+        if code in code_hierarchy:
+            # Not generalizable to other data, obviously
+            condition_code = code_hierarchy[code]
+            h_data = df.copy()
+            for key, item in condition_code.items():
+                h_data = h_data[(h_data[f'{key}_{coder1}'] != item) & (h_data[f'{key}_{coder2}'] != item)]
+            output_row = calculate_agreement_scores(
+                output_row, h_data, col1,
+                col2, code_dict, code, prefix='Partial_', partial=True)
+        else:
+            output_row = calculate_agreement_scores(
+                output_row, df, col1, col2,
+                code_dict, code, prefix='Partial_', partial=True)
+
+    # Conditional Agreement
+    if code in code_hierarchy:
+        output_row = calculate_agreement_scores(
+            output_row, h_data,
+            col1, col2, code_dict, code, prefix='Conditional_')
+    else:
+        output_row['Conditional_Agreement'] = None
+        output_row['Conditional_Cohen_Kappa'] = None
+
+    # Grouped Agreement
+    if code in code_groups:
+        group_dict = code_groups[code]
+        for key, item in group_dict.items():
+            df = df.replace(key, item)
+        grouped_categories = list(set(group_dict.values()))
+        output_categories = grouped_categories + [x for x in code_dict[code] if x not in group_dict]
+        output_dict = {code: list(output_categories)}
+        output_row = calculate_agreement_scores(
+            output_row, df,
+            col1, col2, output_dict, code, prefix='Grouped_')
+    else:
+        output_row['Grouped_Agreement'] = None
+        output_row['Grouped_Cohen_Kappa'] = None    
+
+    return output_row
+
+
+def calculate_agreement_scores(
+        output_row, df, col1, col2,
+        code_dict, code, prefix='', partial=False):
+
+    # Total Rows
+    count = df.shape[0]
+    output_row[f'{prefix}N'] = count
+
+    if partial:
+        # This is so messed up. Means to an end.
+        data1 = []
+        data2 = []
+        same_count = 0
+        for _, row in df.iterrows():
+            vals1, vals2 = str.split(str(row[col1]), '|'), str.split(str(row[col2]), '|')
+            if not set(vals1).isdisjoint(vals2):
+                vals1, vals2 = vals1[0], vals1[0]
+                same_count += 1
+            else:
+                vals1, vals2 = vals1[0], vals2[0]
+            data1 += [vals1]
+            data2 += [vals2]
+    else:
+        data1 = df[col1].astype(str)
+        data2 = df[col2].astype(str)
+        same_count = df[df[col1] == df[col2]].shape[0]
+
+    # Agreement
+    agreement = same_count / count
+    output_row[f'{prefix}Agreement'] = agreement
+
+    # Cohen's Kappa
+    c_kappa = cohen_kappa_score(data1, data2, labels=code_dict[code])
+    if np.isnan(c_kappa):
+        output_row[f'{prefix}Cohen_Kappa'] = 'N/A'
+    else:
+        output_row[f'{prefix}Cohen_Kappa'] = c_kappa
+
+    # Fleiss' Kappa
+
+    return output_row
+
+
+def write_confusion(
+        df, writer, confusion_sheet, confusion_rownum,
+        code, coder1, coder2, code_dict, multi_select_codes):
+
+    """ Writes confusion matrices into something tractable in a .csv file.
+        Enable for 2+ raters
+    """
+
+    col1 = list(df[f'{code}_{coder1}'].astype(str))
+    col2 = list(df[f'{code}_{coder2}'].astype(str))
+
+    # # Remove 'Unclear' and other excluded rows.
+    # df = df[~(df[col1].isin(exclude_values)) & ~(df[col2].isin(exclude_values))]
+
+    # Deal with multi-select in the confusion matrices. Not sure if redundant
+    if code in multi_select_codes:
+        new_cols = [[], []]
+        for idx, value1 in enumerate(col1):
+            value2 = col2[idx]
+            if '|' in value1 or '|' in value2:
+                value1 = set(str.split(value1, '|'))
+                value2 = set(str.split(value2, '|'))
+                diff_vals = (value1 - value2).union(value2 - value1)
+                match_vals = value1.intersection(value2)
+                for match in match_vals:
+                    new_cols[0] += [match]
+                    new_cols[1] += [match]
+                for diff in (value1 - value2):
+                    for val in value2:
+                        new_cols[0] += [diff]
+                        new_cols[1] += [val]
+                for diff in (value2 - value1):
+                    for val in value1:
+                        new_cols[0] += [val]
+                        new_cols[1] += [diff]
+        col1 += new_cols[0]
+        col2 += new_cols[1]
+
+    # Confusion matrix
+    confusion = confusion_matrix(col1, col2, labels=code_dict[code])
+
+    # No ground truth, so make it symmetric
+    # 20 points if you can find a Python-y way to do this.
+    for i in range(confusion.shape[0]):
+        for j in range(confusion.shape[1]):
+            if i != j:
+                total = confusion[i, j] + confusion[j, i]
+                confusion[i, j] = total
+                confusion[j, i] = total
+            
+    writer.writerow([code])
+    labels = code_dict[code]
+
+    code_row = [code]
+    writer.writerow(code_row)
+    confusion_rownum = write_xlsx_row(confusion_sheet, code_row, confusion_rownum)
+
+    header_row = [''] + labels
+    writer.writerow(header_row)
+    confusion_rownum = write_xlsx_row(confusion_sheet, header_row, confusion_rownum)
+
+    for idx, row in enumerate(confusion):
+        output_row = [labels[idx]] + row.tolist()
+        confusion_sheet.write_row(confusion_rownum, 0, output_row)
+        confusion_rownum += 1
+        writer.writerow(output_row)
+
+    return confusion_rownum
+
+
+def write_arb(
+        writer, data_dict, lead_code, arb_cols,
+        codes_only, arb_sheets, arb_rownums):
 
     """ Identify codes without a majority consensus, and write those to a new sheet for arbitrating.
-        Currently exits arbitration when any arbitrator affirms the choice of a previous coder, so
+        Currently exits arb when any arbitrator affirms the choice of a previous coder, so
         more complex majority systems are not implemented.
     """
 
@@ -251,7 +556,7 @@ def write_arbitration(writer, data_dict, lead_code, arbitration_columns,
             code_rows = []
             for coder in have_coded:
                 output_row = data_dict[coder].iloc[i].fillna('')
-                data_cols = output_row[arbitration_columns].values.tolist()
+                data_cols = output_row[arb_cols].values.tolist()
                 code_cols = output_row[codes_only].values.tolist()
                 code_rows += [code_cols]
                 output_rows += [data_cols + [coder, 'FALSE'] + code_cols]
@@ -259,202 +564,139 @@ def write_arbitration(writer, data_dict, lead_code, arbitration_columns,
             # Wonky method to determine if there is a majority.
             # There's probably a better way..
             # Hack here for the Notes column, TODO
-            majority_dict = defaultdict(int)
+            # majority_dict = defaultdict(int)
             majority = False
             for idx, row in enumerate(code_rows):
                 for row2 in code_rows[idx + 1:]:
                     if row[:-1] == row2[:-1]:
                         majority = True
 
-            # Finally, if there is no majority, write to arbitration file
+            # Finally, if there is no majority, write to arb file
             # if any([value > 0 for key, value in majority_dict.items()]):
             if majority:
                 continue
-            else:
-                for output_row in output_rows:
-                    writer.writerow(output_row)
-                    arbitration_rownums[arbitrator] = write_xlsx_row(arbitration_worksheets[arbitrator], 
-                            output_row, arbitration_rownums[arbitrator])
+
+            for output_row in output_rows:
+                writer.writerow(output_row)
+                arb_rownums[arbitrator] = write_xlsx_row(
+                    arb_sheets[arbitrator],
+                    output_row, arb_rownums[arbitrator])
+
+            arb_row = [''] * len(arb_cols) + [arbitrator, 'TRUE']
+
+            # Blank out disagreements for arbitrator
+            # Very confusing. I'm a little out of it right now tbh.
+            for idx in range(len(code_cols)):
+                answers = [row[idx] for row in code_rows]
+                if len(answers) == len(set(answers)):
+                    arb_row += ['']
+                else:
+                    arb_row += [max(set(answers), key=answers.count)]
+
+            writer.writerow(arb_row)
+            arb_rownums[arbitrator] = write_xlsx_row(
+                arb_sheets[arbitrator],
+                arb_row, arb_rownums[arbitrator])
+
+    return arb_sheets, arb_rownums
 
 
-                arb_row = [''] * len(arbitration_columns) + [arbitrator, 'TRUE']
+def process_individual_stats(
+        individual_writer, individual_sheet, individual_rownum,
+        data_dict, lead_code, analysis_codes, multi_select_codes,
+        individual_header):
 
-                # Blank out disagreements for arbitrator
-                # Very confusing. I'm a little out of it right now tbh.
-                for idx in range(len(code_cols)):
-                    answers = [row[idx] for row in code_rows]
-                    if len(answers) == len(set(answers)):
-                        arb_row += ['']
+    for coder, df in data_dict.items():
+
+        output_row = {'Coder': coder}
+
+        df = df[~df[lead_code].isnull()]
+
+        for code in analysis_codes:
+
+            output_row['Code'] = code
+
+            sub_df = df[code].dropna()
+
+            # Deal with multi-select in the confusion matrices. Not sure if redundant
+            if code in multi_select_codes:
+                data = list(sub_df.astype(str))
+                multi_select_count = 0
+                new_data = []
+                for idx, value in enumerate(data):
+                    if '|' in value:
+                        multi_select_count += 1
+                        values = set(str.split(value, '|'))
+                        for val in values:
+                            new_data += [val]
                     else:
-                        arb_row += [max(set(answers), key=answers.count)]
+                        new_data += [value]
+                sub_df = pd.DataFrame(new_data, columns=[code])
+                sub_df = sub_df[code]
+                multi_select_percent = multi_select_count / len(data)
+            else:
+                multi_select_count = None
+                multi_select_percent = None
 
-                writer.writerow(arb_row)
-                arbitration_rownums[arbitrator] = write_xlsx_row(arbitration_worksheets[arbitrator], 
-                        arb_row, arbitration_rownums[arbitrator])
+            output_row['Multi_N'] = multi_select_count
+            output_row['Multi_Percent'] = multi_select_percent
 
+            # sub_df = sub_df[~sub_df[code].isnull()]
+            percents = sub_df.value_counts(normalize=True) * 100
+            counts = sub_df.value_counts()
+
+            for key, value in percents.items():
+                output_row['N'] = counts[key]
+                output_row['Percent'] = value
+                output_row['Value'] = key
+
+                individual_writer.writerow(output_row)
+                write_xlsx_row(individual_sheet, output_row, individual_rownum, individual_header)
+                individual_rownum += 1
 
     return
 
 
-def write_confusion(writer, confusion_worksheet, confusion_rownum,
-            confusion, code, code_dict):
+def write_discussion(dworkbook, data_dict, lead_code, codes_only, coders, analysis_codes):
 
-    """ Writes confusion matrices into something tractable in a .csv file.
-    """
+    # Individual Statistics
+    discussion_header = ['Pair_1', 'Pair_2', 'Row'] + analysis_codes
 
-    writer.writerow([code])
-    labels = code_dict[code]
+    for idx, (coder1, coder2) in enumerate(combinations(coders, 2)):
 
-    code_row = [code]
-    writer.writerow(code_row)
-    confusion_rownum = write_xlsx_row(confusion_worksheet, code_row, confusion_rownum)
+        discussion_sheet = dworkbook.add_worksheet(f'{coder1}_{coder2}')
+        discussion_sheet.write_row(0, 0, discussion_header)
 
-    header_row = [''] + labels
-    writer.writerow(header_row)
-    confusion_rownum = write_xlsx_row(confusion_worksheet, header_row, confusion_rownum)
+        combined = process_pair_codesheet(
+            data_dict, coders, analysis_codes, coder1, coder2, lead_code)
 
-    for idx, row in enumerate(confusion):
-        output_row = [labels[idx]] + row.tolist()
-        confusion_worksheet.write_row(confusion_rownum, 0, output_row)
-        confusion_rownum += 1
-        writer.writerow(output_row)
+        rownum = 1
+        for i in tqdm(range(combined.shape[0])):
 
-    return confusion_rownum
+            row = combined.iloc[i]
+            output_row = {'Pair_1': coder1, 'Pair_2': coder2, 'Row': combined.index[i]}
+            # print(row)
 
+            if row.iloc[0:len(analysis_codes)].tolist() == row.iloc[len(analysis_codes):].tolist():
+                continue
 
-def process_aggregate_codesheet(data_dict, codes_coders, analysis_codes, lead_code):
+            for code in analysis_codes:
+                if row[f'{code}_{coder1}'] != row[f'{code}_{coder2}']:
+                    output_row[code] = ' // '.join([str(row[f'{code}_{coder1}']), str(row[f'{code}_{coder2}'])])
+            
+            write_xlsx_row(discussion_sheet, output_row, rownum, discussion_header)
+            rownum += 1
 
-    # Get all codes from coders
-    all_dfs = []
-    for key, data in data_dict.items():
-        df = data[analysis_codes]
-        all_dfs += [df]
-
-    # Fill in that dataframe with the matching codes from coders
-    coding_array = []
-    sample_df = df
-    for index in tqdm(range(sample_df.shape[0])):
-
-        row_vals = []
-        for df in all_dfs:
-            row = df.iloc[index]
-            if not pd.isnull(row[lead_code]):
-                row_vals += row.values.tolist()
-        row_vals += (len(all_dfs) * len(analysis_codes) - len(row_vals)) * [np.nan]
-        coding_array += [row_vals]
-
-    colnames = []
-    for i in range(len(all_dfs)):
-        colnames += [f'{code}_{i}' for code in analysis_codes]
-
-    combined_df = pd.DataFrame(coding_array, columns=colnames)
-
-    return combined_df
+    return
 
 
+def scratch_code():
 
-def process_pair_codesheet(data_dict, codes_coders, analysis_codes, coder, pair_coder):
+            # params = namedtuple('Parameters', [
+                # 'code_dict', 'code_hierarchy', 'multi_select_codes', 'code_groups',
+                # 'lead_code', 'exclude_values', 'analysis_codes', 'code_header', 'max_raters'])
 
-    df = data_dict[coder][codes_coders]
-    df = df[(df[coder]) & (df[pair_coder])][analysis_codes]
-    df.columns = [f'{x}_{coder}' for x in list(df)]
-    return df
-
-
-def calculate_all_scores(output_row, df, coder1, coder2, code_dict, code, code_hierarchy, 
-            multi_select_codes, code_groups, lead_code, exclude_values):
-
-    col1 = f'{code}{coder1}'
-    col2 = f'{code}{coder2}'
-
-    # Remove null rows that have not yet been coded, according to the "lead code" (i.e. first code).
-    df = df[~(df[f'{lead_code}{coder1}'].isna()) & ~(df[f'{lead_code}{coder2}'].isna())]
-
-    # Remove 'Unclear' and other excluded rows.
-    df = df[~(df[col1].isin(exclude_values)) & ~(df[col2].isin(exclude_values))]
-
-    # Basic Agreement
-    output_row, count, agreement, c_kappa, confusion = calculate_agreement_scores(output_row, df, 
-            col1, col2, code_dict, code, prefix='')
-
-    # Partial Agreement
-    if code in multi_select_codes:
-        if code in code_hierarchy:
-            # Not generalizable to other data, obviously
-            condition_code = code_hierarchy[code]
-            h_data = df.copy()
-            for key, item in condition_code.items(): 
-                h_data = h_data[(h_data[f'{key}{coder1}'] != item) & (h_data[f'{key}{coder2}'] != item)]
-            output_row, p_count, p_agreement, p_kappa, p_confusion = calculate_agreement_scores(output_row, h_data, col1,
-                    col2, code_dict, code, prefix='Partial_', partial=True)
-        else:
-            output_row, p_count, p_agreement, p_kappa, p_confusion = calculate_agreement_scores(output_row, df, col1, col2,
-                    code_dict, code, prefix='Partial_', partial=True)
-
-    # Conditional Agreement
-    if code in code_hierarchy:                    
-        output_row, h_count, h_agreement, h_kappa, h_confusion = calculate_agreement_scores(output_row, h_data,
-                col1, col2, code_dict, code, prefix='Conditional_')
-    else:
-        output_row['Conditional_Agreement'] = None
-        output_row['Conditional_Cohen_Kappa'] = None
-
-    # Grouped Agreement
-    if code in code_groups:
-        group_dict = code_groups[code]
-        for key, item in group_dict.items():
-            df = df.replace(key, item)
-        grouped_categories = list(set([val for val in group_dict.values()]))
-        output_categories = grouped_categories + [x for x in code_dict[code] if x not in group_dict]
-        output_dict = {code: list(output_categories)}
-        output_row, g_count, g_agreement, g_kappa, g_confusion = calculate_agreement_scores(output_row, df, 
-                col1, col2, output_dict, code, prefix='Grouped_')
-
-    return output_row, confusion
-
-
-def calculate_agreement_scores(output_row, df, col1, col2, code_dict, code, prefix='', partial=False):
-
-    # Total Rows
-    count = df.shape[0]
-    output_row[f'{prefix}N'] = count
-
-    if partial:
-        # This is so messed up. Means to an end.
-        data1 = []
-        data2 = []
-        same_count = 0
-        for index, row in df.iterrows():
-            vals1, vals2 = str.split(str(row[col1]), '|'), str.split(str(row[col2]), '|')
-            if not set(vals1).isdisjoint(vals2):
-                vals1, vals2 = vals1[0], vals1[0]
-                same_count += 1
-            else:
-                vals1, vals2 = vals1[0], vals2[0]
-            data1 += [vals1]
-            data2 += [vals2]
-    else:
-        data1 = df[col1].astype(str)
-        data2 = df[col2].astype(str)
-        same_count = df[df[col1] == df[col2]].shape[0]
-
-    # Agreement
-    agreement = same_count / count
-    output_row[f'{prefix}Agreement'] = agreement
-
-    # Cohen's Kappa
-    c_kappa = cohen_kappa_score(data1, data2, labels=code_dict[code])
-    if np.isnan(c_kappa):
-        output_row[f'{prefix}Cohen_Kappa'] = 'N/A'
-    else:
-        output_row[f'{prefix}Cohen_Kappa'] = c_kappa
-
-    # Fleiss' Kappa
-
-    # Confusion matrix
-    confusion = confusion_matrix(data1, data2, labels=code_dict[code])
-
-    return output_row, count, agreement, c_kappa, confusion
+    return
 
 
 if __name__ == '__main__':

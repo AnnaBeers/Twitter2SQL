@@ -284,6 +284,10 @@ def dict_dict():
     return defaultdict(dict)
 
 
+def list_dict():
+    return defaultdict(dict)
+
+
 def sql_type_dictionary():
     
     """ Return a dictionary of PSQL types for typical column names

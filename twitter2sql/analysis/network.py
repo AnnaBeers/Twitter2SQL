@@ -36,7 +36,8 @@ def generate_network_gefx(database_name,
                 itersize=1000,
                 limit=None,
                 mode='networkx',
-                overwrite=False):
+                overwrite=False,
+                mutual_overwrite=True):
 
     # Type of tweet requested.
     if connection_type not in ['retweet', 'quote', 'reply', 'mention', 'all']:
@@ -108,7 +109,8 @@ def generate_network_gefx(database_name,
     if mode == 'networkx':
         if graph is None:
             graph = process_dicts_nx(connections_dict, user_dict, connect_column,
-                connect_column_screen_name, connection_limit, link_type, mutual_dict)
+                connect_column_screen_name, connection_limit, link_type, mutual_dict,
+                mutual_pkl_file, mutual_overwrite)
             nx.write_gexf(graph, output_network_file)
 
         if network_pruning:
@@ -262,9 +264,11 @@ def process_dicts(input_dict, user_dict, connect_column,
     return output_data
 
 
+@profile
 def process_dicts_nx(input_dict, user_dict, connect_column,
             connect_column_screen_name, connection_limit=20,
-            connection_mode='mutual', mutual_dict=None):
+            connection_mode='mutual', mutual_dict=None,
+            mutual_pkl_file=None, mutual_overwrite=False):
 
     graph = nx.DiGraph()
 
@@ -285,15 +289,20 @@ def process_dicts_nx(input_dict, user_dict, connect_column,
 
     elif connection_mode == 'mutual':
 
-        if mutual_dict is None:
+        if mutual_dict is None or mutual_overwrite:
             mutual_dict = defaultdict(int_dict)
-            for connecting_user, connecting_dict in tqdm(input_dict.items()):
-                connected_users = list(connecting_dict.keys())
-                pairs = combinations(connected_users, 2)
+            pbar = tqdm(input_dict.items())
+            for connecting_user, connecting_dict in pbar:
+                connected_users = [key for key, val in connecting_dict.items() if val['count'] > 4]
+                pairs = list(combinations(connected_users, 2))
+                pbar.set_description("Mutual dict %s" % len(mutual_dict))
                 for pair in pairs:
                     if pair[1] in mutual_dict[pair[0]].keys():
                         pair = [pair[1], pair[0]]
                     mutual_dict[pair[0]][pair[1]] += 1
+
+            with open(mutual_pkl_file, 'wb') as openfile:
+                pickle.dump(mutual_dict, openfile)
 
         for connecting_user, connecting_dict in tqdm(mutual_dict.items()):
             for connected_user, count in connecting_dict.items():
@@ -301,8 +310,6 @@ def process_dicts_nx(input_dict, user_dict, connect_column,
                     graph.add_edges_from([(connecting_user, connected_user)])
                     graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
                     graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name'])))
-
-        pass
 
     return graph
 

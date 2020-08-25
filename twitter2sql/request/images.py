@@ -5,6 +5,13 @@ import json
 import sys
 import requests
 import shutil
+import csv
+import numpy as np
+import tables
+import scipy.cluster.hierarchy as hcluster
+import matplotlib.pyplot as plt
+import matplotlib
+import cv2
 
 from tqdm import tqdm
 from datetime import datetime
@@ -12,20 +19,33 @@ from psycopg2 import sql
 from pprint import pprint
 from glob import glob
 from hashlib import sha256
-from collections import defaultdict
-from shutil import copy
+from collections import defaultdict, Counter
+from shutil import copy, rmtree
+from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN, SpectralClustering
+from sklearn import preprocessing, manifold
+from sklearn.decomposition import PCA
+from keras.models import load_model, Model
+from sklearn.neighbors import kneighbors_graph
+from sklearn.metrics import silhouette_samples, silhouette_score
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+from umap import UMAP
+from sklearn.preprocessing import StandardScaler
 
 from twitter2sql.core import json_util
 from twitter2sql.core import sql_statements
 from twitter2sql.core.util import open_database, save_to_csv, \
-        to_list_of_dicts, to_pandas, set_dict, int_dict, dict_dict
+    to_list_of_dicts, to_pandas, set_dict, int_dict, dict_dict, \
+    list_dict
 
 
 # @profile
-def get_images_from_json(input_directory,
+def gather_images(input_data,
                 output_directory,
                 hash_output,
+                input_type='json',
                 size='large',
+                hash_columns=['id', 'user_id', 'created_at'],
+                original_only=False,
                 proxies=None,
                 timeout=None,
                 overwrite=False,
@@ -35,69 +55,73 @@ def get_images_from_json(input_directory,
     if not os.path.exists(output_directory):
         os.mkdir(output_directory)
 
-    input_jsons = glob(os.path.join(input_directory, '*.json'))
-    
     if os.path.exists(hash_output):
         with open(hash_output, 'r') as f:
-            # hash_dict = json.loads(f)
             hash_dict = json.load(f)
-        hash_dict = defaultdict(list, hash_dict)
+        hash_dict = defaultdict(dict, hash_dict)
     else:
-        hash_dict = defaultdict(list)
+        hash_dict = defaultdict(dict)
+
+    hash_dict['__broken__']['tweets'] = []
+    hash_dict['__broken__']['imgpath'] = None
 
     all_ids = []
     for key, val in hash_dict.items():
-        all_ids += val
+        all_ids += [x['id'] for x in val['tweets']]
+    # all_ids = list(hash_dict.values())
 
     tweet_count = 0
     img_count = 0
-    pbar = tqdm(input_jsons)
     types = set()
 
     try:
-        for input_json in pbar:
 
-            with open(input_json, 'r') as f:
-                json_data = json.load(f)
+        if input_type == 'json':
+            input_jsons = glob(os.path.join(input_data, '*.json'))
+            pbar = tqdm(input_jsons)
 
-            for data in tqdm(json_data):
-                tweet_count += 1
-                pbar.set_description(f'Total tweets {tweet_count}, Total images {img_count}, Hashes {len(hash_dict)}')
-                if not data['in_reply_to_status_id']:
-                    continue
-                urls = json_util.extract_images(data)
-                tweet_id = data['id_str']
+            for input_json in pbar:
 
-                if urls:
-                    for idx, url in enumerate(urls):
-                        img_count += 1
-                        ext = os.path.splitext(url)[1]
-                        img_code = f'{tweet_id}_{idx}'
-                        save_dest = os.path.join(output_directory, f'{img_code}{ext}')
+                with open(input_json, 'r') as f:
+                    json_data = json.load(f)
 
-                        if not (os.path.exists(save_dest)) or overwrite:
-                            # This messes up overwrite
-                            if img_code not in all_ids:
+                for data in tqdm(json_data):
+                    tweet_count += 1
+                    pbar.set_description(f'Total tweets {tweet_count}, Total images {img_count}, Hashes {len(hash_dict)}')
 
-                                # I think this reads things twice because of the hashing, return to this.
-                                r = requests.get(url + ":" + size, stream=True, proxies=proxies)
-                                if r.status_code == 200:
-                                    r.raw.decode_content = True
-                                    raw_data = r.raw.data
-                                    sig = sha256(raw_data)
-                                    if sig.hexdigest() in hash_dict:
-                                        hash_dict[sig.hexdigest()] += [img_code]
-                                    else:
-                                        hash_dict[sig.hexdigest()] += [img_code]
-                                        with open(save_dest, "wb") as f:
-                                            f.write(raw_data)
-                                else:
-                                    hash_dict['__broken__'] += [img_code]
+                    urls = json_util.extract_images(data)
+                    tweet_id = data['id_str']
+
+                    hash_dict, img_count = save_urls(
+                        urls, output_directory, hash_dict, img_count, size, proxies)
+
+        if input_type == 'csv':
+            with open(input_data, 'r') as readfile:
+                row_count = sum(1 for row in readfile)
+
+            with open(input_data, 'r') as readfile:
+                tweet_ids = set()
+                reader = csv.DictReader(readfile)
+                pbar = tqdm(reader, total=row_count)
+                for row in pbar:
+                    tweet_id = row['id']
+                    tweet_ids.add(tweet_id)
+                    tweet_count = len(tweet_ids)
+                    pbar.set_description(f'Total tweets {tweet_count}, Total images {img_count}, Hashes {len(hash_dict)}')
+
+                    if row['extended_type'] == 'photo':
+                        urls = [row['extended_url']]
+                    else:
+                        continue
+
+                    hash_dict, img_count = save_urls(
+                        row, urls, output_directory, hash_dict, hash_columns,
+                        all_ids, img_count, size, proxies, overwrite)
 
     except KeyboardInterrupt as e:
         with open(hash_output, 'w') as fp:
             json.dump(hash_dict, fp)
-        raise e 
+        raise e
 
     with open(hash_output, 'w') as fp:
         json.dump(hash_dict, fp)
@@ -105,30 +129,373 @@ def get_images_from_json(input_directory,
     return
 
 
-def get_top_images(input_hash, 
+def save_urls(
+        data, urls, output_directory, hash_columns,
+        hash_dict, all_ids, img_count, size, proxies, overwrite):
+
+    if urls:
+        for idx, url in enumerate(urls):
+            tweet_id = data['id']
+            img_count += 1
+            ext = os.path.splitext(url)[1]
+            img_code = f'{tweet_id}_{idx}'
+            save_dest = os.path.join(output_directory, f'{img_code}{ext}')
+
+            data_dict = {data[col] for col in hash_columns}
+            data_dict['url'] = url
+
+            if not (os.path.exists(save_dest)) or overwrite:
+                # This messes up overwrite
+                if img_code not in all_ids:
+
+                    # I think this reads things twice because of the hashing, return to this.
+                    r = requests.get(url + ":" + size, stream=True, proxies=proxies)
+                    if r.status_code == 200:
+                        r.raw.decode_content = True
+                        raw_data = r.raw.data
+                        sig = sha256(raw_data)
+                        if sig.hexdigest() in hash_dict:
+                            hash_dict[sig.hexdigest()]['tweets'] += [data_dict]
+                        else:
+                            hash_dict[sig.hexdigest()]['imgpath'] = save_dest
+                            hash_dict[sig.hexdigest()]['tweets'] = [data_dict]
+                            with open(save_dest, "wb") as f:
+                                f.write(raw_data)
+                    else:
+                        hash_dict['__broken__']['tweets'] += [data_dict]
+
+    return hash_dict, img_count
+
+
+def get_top_images(input_hash,
             images_directory,
             output_directory,
-            top_images=50):
+            top_images=50,
+            remove_previous=False):
 
     if not os.path.exists(output_directory):
+        os.mkdir(output_directory)
+    elif remove_previous:
+        rmtree(output_directory)
         os.mkdir(output_directory)
 
     with open(input_hash, 'r') as f:
         hash_dict = json.load(f)  
 
-    hash_dict = {k: v for k, v in sorted(hash_dict.items(), key=lambda item: len(item[1]), reverse=True)}
+    hash_dict = {k: v for k, v in sorted(hash_dict.items(), key=lambda item: len(set([val['user_id'] for val in item[1]])), reverse=True)}
 
     count = 0
-    for key, item in hash_dict.items():
+    for idx, (key, item) in enumerate(hash_dict.items()):
         if key == '__broken__':
             continue
         print(key, len(item))
-        target_image = glob(os.path.join(images_directory, f'{item[0]}*'))
-        print(target_image)
-        copy(target_image[0], os.path.join(output_directory, os.path.basename(target_image[0])))
+
+        # target_image = glob(os.path.join(images_directory, f'{item[0]}*'))
+
+        for i in item:
+            target_image = glob(os.path.join(images_directory, f'{i["img_code"]}*'))
+            if target_image != []:
+                break
+
+        output_filename = os.path.join(output_directory, f'{str(idx).zfill(3)}_{os.path.basename(target_image[0])}')
+        copy(target_image[0], output_filename)
         count += 1
         if count == top_images:
             break
+
+
+def extract_features(image_directory, input_hash, output_filepath, output_hashes, limit=500):
+
+    from keras.preprocessing import image
+    from keras.applications.vgg16 import VGG16
+    from keras.applications.vgg16 import preprocess_input
+
+    with open(input_hash, 'r') as f:
+        hash_dict = json.load(f)
+    hash_dict.pop('__broken__', None)
+
+    hash_vals = list(hash_dict.items())
+    if limit is None:
+        limit = len(hash_vals)
+
+    base_model = VGG16(weights='imagenet', include_top=True)
+    model = Model(inputs=base_model.input,
+            outputs=base_model.get_layer('fc2').output)
+
+    # Write to HDF5, large data storage format.
+    hdf5_file = tables.open_file(output_filepath, mode='w')
+    filters = tables.Filters(complevel=5, complib='blosc')
+    num_cases = limit
+    data_shape = (0, 4096)  # TODO: Make this adjust automatically
+    data_storage = hdf5_file.create_earray(hdf5_file.root, 'features', 
+        tables.Float32Atom(), shape=data_shape, filters=filters, expectedrows=num_cases)
+
+    try:
+        feature_hashes = []
+        for idx, (key, item) in tqdm(list(enumerate(hash_vals))):
+
+            if idx > limit:
+                break
+
+            for i in item:
+                target_image = glob(os.path.join(image_directory, f'{i["img_code"]}*'))
+                if target_image != []:
+                    break
+            if target_image == []:
+                continue
+
+            feature_hashes += [key]
+
+            input_image = target_image[0]
+
+            img = image.load_img(input_image, target_size=(224, 224))
+            img_data = image.img_to_array(img)
+            img_data = np.expand_dims(img_data, axis=0)
+            img_data = preprocess_input(img_data)
+            output_features = model.predict(img_data)
+            data_storage.append(output_features)
+
+    except:
+        with open(output_hashes, 'w') as fp:
+            json.dump(feature_hashes, fp)
+        hdf5_file.close()
+
+    with open(output_hashes, 'w') as fp:
+        json.dump(feature_hashes, fp)
+    hdf5_file.close()
+
+    return
+
+
+def cluster_features(
+        input_hdf5, input_hash, output_directory, image_directory,
+        feature_hashes, normalize=None, verbose=True,
+        remove_previous=False):
+
+    with open(input_hash, 'r') as f:
+        hash_dict = json.load(f)
+
+    with open(feature_hashes, 'r') as f:
+        feature_hashes = json.load(f)
+
+    matplotlib.use('TkAgg')
+
+    if verbose:
+        print('Open data...')
+
+    open_hdf5 = tables.open_file(input_hdf5, "r")
+    data = getattr(open_hdf5.root, 'features')
+    data = data.read().reshape(data.shape[0], -1)
+
+    if verbose and normalize:
+        print('Normalize data...')
+    # data = preprocessing.normalize(data, norm='l2')
+    # data = StandardScaler().fit_transform(data)
+    print(data.shape)
+    np.set_printoptions(suppress=True)
+
+    print('Dimension Reduction...')
+    pca_components = 100
+    pca = PCA(n_components=pca_components, random_state=728).fit(data.T)
+    pca_features = pca.components_.T
+    print(sum(pca.explained_variance_ratio_[0:pca_components]))
+    # pca_features = manifold.TSNE(n_components=2, init='pca', perplexity=25,
+             # random_state=0).fit_transform(data)
+    # pca_features = UMAP(min_dist=.01, verbose=True, n_neighbors=20).fit_transform(data)
+    print(pca_features.shape)
+
+    # image_scatter_plot(pca_features, hash_dict, feature_hashes, image_directory)
+    # raise 
+
+    print('Clustering...')
+    thresh = 1
+    # clusters = hcluster.fclusterdata(data, thresh, criterion="distance")
+    # clusters = KMeans(n_clusters=180, random_state=0).fit(pca_features)
+    # connectivity = kneighbors_graph(pca_features, n_neighbors=10)
+    # connectivity = 0.5 * (connectivity + connectivity.T)
+    # clusters = AgglomerativeClustering(n_clusters=100,
+                    # linkage='ward', connectivity=connectivity).fit(pca_features)
+    # clusters = DBSCAN(eps=.2).fit(pca_features)
+    # clusters = SpectralClustering(n_clusters=20, eigen_solver='arpack', affinity="nearest_neighbors").fit(pca_features)
+
+    # sum_of_squared_distances = []
+    K = range(2, 500)
+    for k in tqdm(K):
+        km = KMeans(n_clusters=k)
+        km = km.fit(pca_features)
+        # sum_of_squared_distances.append(km.inertia_)
+        sum_of_squared_distances.append(silhouette_score(pca_features, km.labels_))
+        print(sum_of_squared_distances[-1])
+    plt.plot(K, sum_of_squared_distances, 'bx-')
+    plt.xlabel('k')
+    plt.ylabel('Sum_of_squared_distances')
+    plt.title('Elbow Method For Optimal k')
+    # plt.savefig("optimal_k.png")
+    plt.show()
+    raise
+    # clusters = [1] * pca_features.shape[0]
+
+    clusters = clusters.labels_
+    counts = Counter(clusters)
+    counts = [[key, val] for key, val in counts.items()]
+    print(counts)
+    print(clusters)
+    print(len(set(clusters)))
+
+    # plt.figure(figsize=(45, 45))
+    # plt.scatter(pca_features[:, 0], pca_features[:, 1], c=clusters)
+    # plt.axis("equal")
+    # title = "threshold: %f, number of clusters: %d" % (thresh, len(set(clusters)))
+    # plt.title(title)
+    # plt.show()
+    # plt.savefig("clusters.png")
+    # raise
+    # raise
+
+    sorted_cluster_idx = np.argsort(clusters)
+    # all_images = glob(os.path.join(image_directory, '*'))
+
+    # hashes = list(hash_dict.items())
+    # for idx in sorted_cluster_idx:
+    #     cluster = clusters[idx]
+    #     key, item = 
+    # raise
+    if not os.path.exists(output_directory):
+        os.mkdir(output_directory)
+    elif remove_previous:
+        rmtree(output_directory)
+        os.mkdir(output_directory)
+
+    # for idx in tqdm(sorted_cluster_idx):
+
+        # key = feature_hashes[idx]
+        # cluster = clusters[idx]
+
+    for cluster, count in tqdm(reversed(counts)):
+
+        print(cluster, count)
+        indices = [i for i, x in enumerate(clusters) if x == cluster]
+
+        for idx in indices:
+
+            key = feature_hashes[idx]
+
+            if key == '__broken__':
+                continue
+
+            cluster_directory = os.path.join(output_directory, str(cluster))
+            if not os.path.exists(cluster_directory):
+                os.mkdir(cluster_directory)
+
+            for i in hash_dict[key]:
+                target_image = glob(os.path.join(image_directory, f'{i["img_code"]}*'))
+                if target_image != []:
+                    break
+
+            copy(target_image[0], os.path.join(cluster_directory, os.path.basename(target_image[0])))
+
+    # # plotting
+    # plt.scatter(*np.transpose(data), c=clusters)
+    # plt.axis("equal")
+    # title = "threshold: %f, number of clusters: %d" % (thresh, len(set(clusters)))
+    # plt.title(title)
+    # plt.show()
+
+    # raise
+    # kmeans = KMeans(n_clusters=2, random_state=0).fit(vgg16_feature_list_np)
+
+    return
+
+
+def image_scatter_plot(tsne, hash_dict, feature_hashes, image_directory, figsize=(45,45)):
+
+    images = []
+
+    for feature_hash in tqdm(feature_hashes):
+
+        for i in hash_dict[feature_hash]:
+            image_path = glob(os.path.join(image_directory, f'{i["img_code"]}*'))
+            if image_path != []:
+                break
+        image_path = image_path[0]
+
+        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        image = cv2.resize(image, (60, 60), interpolation=cv2.INTER_AREA)
+                
+        images.append(image)
+            
+    images = np.array(images)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    artists = []
+    for xy, i in zip(tsne, images):
+        x0, y0 = xy
+        img = OffsetImage(i, zoom=1)
+        ab = AnnotationBbox(img, (x0, y0), xycoords='data', frameon=False)
+        artists.append(ax.add_artist(ab))
+    ax.update_datalim(tsne)
+    ax.autoscale()
+    plt.savefig("image_clusters.png")
+    # plt.show()
+
+    return
+
+
+def get_image_collages(
+        cluster_directories, output_directory='Cluster_Previews',
+        image_size=(90, 90), cols=6, remove_previous=False):
+
+    matplotlib.use('Agg')
+    if not os.path.exists(output_directory):
+        os.mkdir(output_directory)
+    elif remove_previous:
+        rmtree(output_directory)
+        os.mkdir(output_directory)
+
+    cluster_directories = glob(os.path.join(cluster_directories, '*'))
+
+    for cluster_dir in tqdm(cluster_directories):
+        cluster_num = os.path.basename(cluster_dir)
+        image_files = glob(os.path.join(cluster_dir, '*'))
+
+        output_filepath = os.path.join(output_directory, f'{cluster_num}.png')
+
+        rows = int(image_size[0] * np.ceil(len(image_files) / cols))
+        collage = np.zeros((rows, cols * image_size[1], 3), dtype=float)
+
+        row_index = 0
+        col_index = 0
+        for image_path in image_files:
+
+            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            image = cv2.resize(image, image_size, interpolation=cv2.INTER_AREA)
+
+            collage[row_index:row_index + image_size[0], col_index:col_index + image_size[1], :] = image
+
+            if col_index == collage.shape[1] - image_size[1]:
+                col_index = 0
+                row_index += image_size[0]
+            else:
+                col_index += image_size[1]
+
+        collage = collage.astype(int)
+        plt.figure(figsize=(collage.shape[0] / 100, collage.shape[1] / 100), dpi=100, frameon=False)
+        # plt.figure(figsize=(25, 25), frameon=False)
+        # plt.figure(frameon=False)
+        plt.margins(0, 0)
+        plt.gca().set_axis_off()
+        plt.gca().xaxis.set_major_locator(plt.NullLocator())
+        plt.gca().yaxis.set_major_locator(plt.NullLocator())
+        plt.imshow(collage)
+
+        plt.savefig(output_filepath, bbox_inches='tight', pad_inches=0.0, dpi=500)
+        plt.clf()
+        plt.close()
+
+    return
 
 
 def get_images_from_db(database_name,
@@ -139,240 +506,7 @@ def get_images_from_db(database_name,
                 limit=None,
                 itersize=1000):
 
-    if not os.path.exists(output_directory):
-        os.mkdir(output_directory)
-
-    database, cursor = open_database(database_name, db_config_file, 
-            named_cursor='image_retrieval', itersize=itersize)
-
-    output_prefix = os.path.basename(output_directory)
-    
-    # cursor.execute(sql_statements.count_rows(table_name))
-    # print(cursor.fetchall())
-    # return
-    conditions = sql_statements.format_conditions(conditions)
-    limit_statement = sql_statements.limit(limit)
-
-    image_statement = sql.SQL("""
-        SELECT {select}
-        FROM {table_name}
-        {conditions}
-        {limit_statement}
-        """).format(table_name=sql.SQL(table_name),
-                select=sql.SQL('*'), conditions=conditions,
-                limit_statement=limit_statement)
-    print(image_statement.as_string(cursor))
-    cursor.execute(image_statement)
-    
-    count = 0
-    progress_bar = tqdm()
-    while True:
-        result = cursor.fetchmany(cursor.itersize)
-        if result:
-            for item in result:
-                item = dict(item)
-                pprint(item)
-        else:
-            cursor.close()
-            break
-
-    return
-
-    if type(input_ids) is list:
-        pass
-    elif type(input_ids) is str:
-        if input_ids.endswith('.txt'):
-            with open(input_ids, 'r') as f:
-                input_ids = [line.rstrip() for line in f]
-        else:
-            raise ValueError(f"{input_ids} in str format must be a .txt file.")
-    else:
-        raise ValueError(f"{input_ids} must be either a filepath or a list of screen names.")
-
-    total_tweets = 0
-    with tqdm(input_ids) as t:
-        for uid in t:
-
-            output_file = os.path.join(output_directory, f'{output_prefix}_{str(uid)}.json')
-
-            if stop_condition == 'last_tweet':
-                if not os.path.exists(output_file):
-                    print(output_file)
-                    # If it's the first time, just grab the maximum tweets.
-                    tweets = get_historic_tweets(api, uid, 3200, t)
-                elif append:
-                    print(output_file)
-                    # Otherwise read the last tweet and gather from there.
-                    # May error if someone modifies the json.
-                    with open(output_file, 'r') as f:
-                        tweets = json.load(f)
-                        last_tweet_date = twitter_str_to_dt(tweets[-1]['created_at'])
-                        tweets = get_historic_tweets(api, uid, last_tweet_date, t)
-                else:
-                    tweets = None
-            else:
-                tweets = get_historic_tweets(api, uid, stop_condition, t)
-
-            if tweets:
-                
-                if os.path.exists(output_file):
-                    with open(output_file, "r+") as openfile:
-                        # https://stackoverflow.com/questions/1877999/delete-final-line-in-file-with-python
-                        openfile.seek(0, os.SEEK_END)
-                        pos = openfile.tell() - 1
-                        while pos > 0 and openfile.read(1) != "\n":
-                            pos -= 1
-                            openfile.seek(pos, os.SEEK_SET)
-                        if pos > 0:
-                            openfile.seek(pos, os.SEEK_SET)
-                            openfile.truncate()
-                            openfile.write(',\n')
-                    with open(output_file, "a") as openfile:
-                        for idx, tweet in enumerate(tweets):
-                            json.dump(tweet, openfile)
-                            if idx == len(tweets) - 1:
-                                openfile.write('\n')
-                            else:
-                                openfile.write(",\n")
-                        openfile.write("]")
-                else:
-                    # with open(output_file, "w") as f:
-                        # json.dump(tweets, f) 
-                    with open(output_file, "a") as openfile:
-                        openfile.write("[\n")
-                        for idx, tweet in enumerate(tweets):
-                            json.dump(tweet, openfile)
-                            if idx == len(tweets) - 1:
-                                openfile.write('\n')
-                            else:
-                                openfile.write(",\n")
-                        openfile.write("]")
-
-                total_tweets += len(tweets)
-
-    print(f'{total_tweets} tweets collected.')
-
-    return tweets
-
-
-# Get a uid's tweets
-def get_historic_tweets(api, uid, stop_condition, progress_bar):
-    max_id, finished, tweets = None, False, []
-    while not finished:
-        max_id, finished, returned_tweets = get_historic_tweets_before_id(api, uid, max_id, stop_condition, progress_bar)
-
-        if returned_tweets:
-            tweets.extend(returned_tweets)
-
-    return tweets
-
-
-# Gets 3200 of the most recent tweets associated with the given uid before before_id (or the 3200 most recent tweets if before_id is None)
-# Returns the minimum id of the list of tweets (i.e. the id corresponding to the earliest tweet)
-def get_historic_tweets_before_id(api, uid, max_id, stop_condition, progress_bar):
-
-    # The timeline is returned as pages of tweets (each page has 20 tweets, starting with the 20 most recent)
-    # If a cap has been set and our list of tweets gets to be longer than the cap, we'll stop collecting
-    iterator_count = 200
-    cursor_args = {"id": uid, "count": iterator_count}
-    if max_id:
-        cursor_args["max_id"] = max_id
-
-    try:
-        tweets, finished = collect_timeline(api, cursor_args, iterator_count,
-            stop_condition, progress_bar)
-
-    except tweepy.error.TweepError as ex:
-        # We received a rate limiting error, so wait 15 minutes
-        if "429" in str(ex):  # a hacky way to see if it's a rate limiting error
-            time.sleep(15 * 60)
-            print("rate limited :/")
-
-            # Try again
-            tweets, finished = collect_timeline(api, cursor_args, 
-                    iterator_count, stop_condition, progress_bar)
-
-        elif any(code in str(ex) for code in ["401", "404"]):
-            print(ex)
-            return (None, True, [])
-
-        else:
-            print(uid)
-            print(ex)
-            return (None, True, [])
-
-    if tweets:
-        tweets.sort(reverse=False, key=lambda t: twitter_str_to_dt(t['created_at']))
-        max_id = max(tweets, key=lambda t: int(t["id_str"]))
-        return (max_id, finished, tweets)
-
-    else:
-        return (None, True, [])
-
-
-def collect_timeline(api, cursor_args, iterator_count, stop_condition,
-            progress_bar):
-
-    # List of tweets we've collected so far
-    tweets = []
-    finished = False
-    page_num = 0
-
-    for page in tweepy.Cursor(api.user_timeline, tweet_mode='extended', 
-                **cursor_args).pages(3200 / iterator_count):
-        # Adding the tweets to the list
-
-        json_tweets = [tweet._json for tweet in page]
-
-        finished, filtered_tweets = check_if_collection_is_finished(json_tweets, stop_condition)
-
-        if finished:
-            # Filter out any older tweets
-            json_tweets = filtered_tweets
-        else:
-            # We get 900 requests per 15-minute window, or 1 request/second, so wait 1 second between each request just to be safe
-            time.sleep(1)
-
-        tweets.extend(json_tweets)
-
-        progress_bar.set_description(f'Tweets: {iterator_count * (page_num + 1)}')
-        page_num += 1
-
-        if finished:
-            break
-
-    return tweets, finished
-
-
-def check_if_collection_is_finished(tweets, stop_condition):
-    finished, filtered_tweets = False, []
-
-    if isinstance(stop_condition, datetime):
-        min_tweet = min(tweets, key=lambda t: twitter_str_to_dt(t["created_at"]))
-        min_date = twitter_str_to_dt(min_tweet["created_at"])
-        if min_date < stop_condition:
-            finished, filtered_tweets = True, [t for t in tweets if twitter_str_to_dt(t["created_at"]) >= stop_condition]
-        elif len(tweets) >= 3200:
-            tweets.sort(reverse=True, key=lambda t: twitter_str_to_dt(t['created_at']))
-            finished, filtered_tweets = True, tweets[:stop_condition]
-    elif len(tweets) >= stop_condition:
-        tweets.sort(reverse=True, key=lambda t: twitter_str_to_dt(t['created_at']))
-        finished, filtered_tweets = True, tweets[:stop_condition]
-
-    # elif self.timebound_type == "date":
-    #     min_tweet = min(tweets, key=lambda t: utils.twitter_str_to_dt(t["created_at"]))
-    #     min_date = utils.twitter_str_to_dt(min_tweet["created_at"])
-    #     if min_date < self.timebound_arg:
-    #         finished, filtered_tweets = True, [t for t in tweets if utils.twitter_str_to_dt(t["created_at"]) >= self.timebound_arg]
-
-    # elif self.timebound_type == "last_tweet":
-    #     min_tweet_id = int(min(tweets, key=lambda t: int(t["id_str"]))["id_str"])
-    #     if min_tweet_id <= self.most_recent_tweet_id:
-    #         finished, filtered_tweets = True, [t for t in tweets if int(t["id_str"]) > self.most_recent_tweet_id]
-    # else:
-    #     raise ValueError("{} isn't a supported parameter.".format(self.timebound_type))
-
-    return finished, filtered_tweets
+    raise NotImplementedError
 
 
 if __name__ == '__main__':

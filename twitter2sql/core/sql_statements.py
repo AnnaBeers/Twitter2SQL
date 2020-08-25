@@ -408,19 +408,20 @@ def random_sample(percent, mode='BERNOULLI'):
         return sql.SQL(f'TABLESAMPLE {mode}({percent})')
 
 
-def date_range(date_range):
+def date_range(date_range, date_column='created_at'):
+
     if date_range is None:
         return sql.SQL('')
     if date_range[0] is None:
         date = date_range[1].strftime("%Y-%m-%d")
-        return sql.SQL(f"created_at < '{date}'")
+        return sql.SQL(f"{date_column} < '{date}'")
     elif date_range[1] is None:
         date = date_range[0].strftime("%Y-%m-%d")
-        return sql.SQL(f"created_at > '{date}'")
+        return sql.SQL(f"{date_column} > '{date}'")
     else:
         date_range = [d.strftime('%Y-%m-%d') for d in date_range]
-        return sql.SQL(f"created_at < '{date_range[1]}' \
-            AND created_at > '{date_range[0]}'")
+        return sql.SQL(f"{date_column} < '{date_range[1]}' \
+            AND {date_column} > '{date_range[0]}'")
 
 
 def in_values(col, values):
@@ -511,3 +512,15 @@ def count_rows(table, conditions=None, estimate=False):
             """).format(table=sql.SQL(table))
 
     return
+
+
+def list_tables():
+
+    statement = """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        ORDER BY table_name;
+        """
+
+    return sql.SQL(statement)
