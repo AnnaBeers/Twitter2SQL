@@ -6,12 +6,14 @@ import sys
 
 from tqdm import tqdm
 from datetime import datetime
+from pprint import pprint
+# from shutil import remove
 
 from twitter2sql.core.util import twitter_str_to_dt
 
 
 def get_timelines(api, input_ids, output_directory, stop_condition=3200,
-            append=True):
+            append=True, overwrite=False):
 
     if not os.path.exists(output_directory):
         os.mkdir(output_directory)
@@ -51,7 +53,14 @@ def get_timelines(api, input_ids, output_directory, stop_condition=3200,
                 else:
                     tweets = None
             else:
-                tweets = get_historic_tweets(api, uid, stop_condition, t)
+                if os.path.exists(output_file) and not overwrite:
+                    tweets = None
+                elif os.path.exists(output_file) and append:
+                    raise NotImplementedError
+                else:
+                    if os.path.exists(output_file) and overwrite:
+                        os.remove(output_file)
+                    tweets = get_historic_tweets(api, uid, stop_condition, t)
 
             if tweets:
                 
@@ -164,18 +173,17 @@ def collect_timeline(api, cursor_args, iterator_count, stop_condition,
 
         json_tweets = [tweet._json for tweet in page]
 
-        finished, filtered_tweets = check_if_collection_is_finished(json_tweets, stop_condition)
+        finished, tweets = check_if_collection_is_finished(tweets + json_tweets, stop_condition)
 
         if finished:
             # Filter out any older tweets
-            json_tweets = filtered_tweets
+            # json_tweets = filtered_tweets
+            pass
         else:
             # We get 900 requests per 15-minute window, or 1 request/second, so wait 1 second between each request just to be safe
             time.sleep(1)
 
-        tweets.extend(json_tweets)
-
-        progress_bar.set_description(f'Tweets: {iterator_count * (page_num + 1)}')
+        progress_bar.set_description(f'Tweets: {len(tweets)}')
         page_num += 1
 
         if finished:
@@ -185,7 +193,7 @@ def collect_timeline(api, cursor_args, iterator_count, stop_condition,
 
 
 def check_if_collection_is_finished(tweets, stop_condition):
-    finished, filtered_tweets = False, []
+    finished, filtered_tweets = False, tweets
 
     if isinstance(stop_condition, datetime):
         min_tweet = min(tweets, key=lambda t: twitter_str_to_dt(t["created_at"]))
@@ -195,6 +203,7 @@ def check_if_collection_is_finished(tweets, stop_condition):
         elif len(tweets) >= 3200:
             tweets.sort(reverse=True, key=lambda t: twitter_str_to_dt(t['created_at']))
             finished, filtered_tweets = True, tweets[:stop_condition]
+
     elif len(tweets) >= stop_condition:
         tweets.sort(reverse=True, key=lambda t: twitter_str_to_dt(t['created_at']))
         finished, filtered_tweets = True, tweets[:stop_condition]

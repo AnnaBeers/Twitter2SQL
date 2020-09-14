@@ -17,8 +17,20 @@ def twitter_str_to_dt(dt_str):
     return datetime.strptime(dt_str, "%a %b %d %H:%M:%S +0000 %Y")
 
 
-def open_tweepy_api(twitter_c_key, twitter_c_key_secret, 
-                twitter_a_key, twitter_a_key_secret):
+def open_tweepy_api(twitter_c_key=None, twitter_c_key_secret=None, 
+                twitter_a_key=None, twitter_a_key_secret=None,
+                credentials=None):
+
+    # This is a little stupid.
+    if credentials:
+        creds = {}
+        for line in open(credentials).readlines():
+            key, value = line.strip().split("=")
+            creds[key] = value
+        twitter_c_key = creds['twitter_c_key']
+        twitter_c_key_secret = creds['twitter_c_key_secret']
+        twitter_a_key = creds['twitter_a_key']
+        twitter_a_key_secret = creds['twitter_a_key_secret']
 
     #authorize twitter, initialize tweepy
     auth = tweepy.OAuthHandler(twitter_c_key, twitter_c_key_secret)

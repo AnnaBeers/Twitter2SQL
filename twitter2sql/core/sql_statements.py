@@ -480,6 +480,10 @@ def tweet_formats(formats):
     elif formats == 'retweet':
         return sql.SQL('retweeted_status_user_id IS NOT NULL')
 
+    elif formats == 'nooriginal':
+        return sql.SQL('quoted_status_user_id IS NOT NULL \
+        OR retweeted_status_id IS NOT NULL')
+
     elif formats == 'noretweet':
         return sql.SQL('retweeted_status_id IS NULL')
 
@@ -492,6 +496,13 @@ def tweet_formats(formats):
             'quote': 'quoted_status_id',
             'retweet': 'retweeted_status_id'}
     output_statement = sql.SQL('OR').join([sql.SQL(f'{column_dict[subtype]} IS NOT NULL')])
+    return output_statement
+
+
+def text_search(words, colname='tweet'):
+
+    output_statement = sql.SQL(' OR ').join([sql.SQL(f"{colname} ILIKE '{word}'") for word in words])
+
     return output_statement
 
 

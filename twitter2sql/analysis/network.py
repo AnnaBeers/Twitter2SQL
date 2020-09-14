@@ -2,6 +2,7 @@ import lxml.etree as etree
 import networkx as nx
 import os
 import pickle
+import json
 
 from psycopg2 import sql
 from pprint import pprint
@@ -9,15 +10,17 @@ from datetime import datetime, timezone, timedelta
 from tqdm import tqdm
 from collections import defaultdict
 from itertools import combinations
+from glob import glob
 
 from twitter2sql.core.util import open_database, save_to_csv, \
         to_list_of_dicts, to_pandas, set_dict, int_dict, dict_dict
 from twitter2sql.core import sql_statements
 
 
-def generate_network_gefx(database_name,
-                db_config_file,
-                output_network_file,
+def generate_network_gefx(database_name=None,
+                db_config_file=None,
+                input_json_dir=None,
+                output_network_file=None,
                 save_pkl=True,
                 load_from_pkl=True,
                 load_from_gexf=False,
@@ -28,6 +31,7 @@ def generate_network_gefx(database_name,
                 table_name='tweets',
                 connection_type='retweet',
                 link_type='mutual',
+                edge_weight=True,
                 conditions=[],
                 attributes=None,
                 label='screen_name',
@@ -49,37 +53,10 @@ def generate_network_gefx(database_name,
         raise ValueError(f'connection_type must be networkx, dynamic, \
                 not, {mode}')
 
-    output_columns = set()
-    if attributes is not None:
-        output_columns += attributes
-    output_columns.update(['user_id', 'user_name', 'user_screen_name'])
-
-    tweet_type_condition = sql_statements.tweet_formats(connection_type)
-    where_statement = sql_statements.format_conditions([tweet_type_condition] + conditions)
-
-    # Wonder if this could be exported to a util function.
-    if connection_type == 'retweet':
-        output_columns.update(['retweeted_status_user_id', 'retweeted_status_user_screen_name'])
-        connect_column = 'retweeted_status_user_id'
-        connect_column_screen_name = 'retweeted_status_user_screen_name'
-    elif connection_type == 'quote':
-        output_columns.update(['quoted_status_user_id', 'quoted_status_user_screen_name'])
-        connect_column = 'quoted_status_user_id'
-        connect_column_screen_name = 'quoted_status_user_screen_name'
-    elif connection_type == 'reply':
-        output_columns.update(['in_reply_to_user_id', 'in_reply_to_user_screen_name'])
-        connect_column = 'in_reply_to_user_id'
-        connect_column_screen_name = 'in_reply_to_user_screen_name'
-    elif connection_type == 'mention':
-        raise NotImplementedError('Mentions not yet implemented')
-    elif connection_type == 'all':
-        output_columns += ['quoted_status_user_id', 'quoted_status_user_screen_name', 
-                'retweeted_status_user_id', 'retweeted_status_user_screen_name',
-                'in_reply_to_user_id', 'in_reply_to_user_screen_name']
-
     graph = None
     if not overwrite and load_from_gexf and os.path.exists(input_network_file):
         graph = nx.read_gexf(input_network_file)
+
     elif not overwrite and load_from_pkl and os.path.exists(dict_pkl_file) and os.path.exists(users_pkl_file):
         print('Loading input dict')
         with open(dict_pkl_file, 'rb') as openfile:
@@ -98,19 +75,22 @@ def generate_network_gefx(database_name,
             mutual_dict = None
 
     else:
-        connections_dict, user_dict, = stream_connection_data(database_name, 
-                db_config_file, output_network_file, output_columns,
-                connect_column, connect_column_screen_name, where_statement,
-                save_pkl, dict_pkl_file, users_pkl_file,
-                table_name, connection_type, 
-                attributes, label, itersize, 
-                limit)
+        if input_json_dir:
+            connections_dict, user_dict, = load_connection_data(input_json_dir,
+                    output_network_file, save_pkl, dict_pkl_file, users_pkl_file, 
+                    connection_type, attributes, label)
+        else:
+            connections_dict, user_dict, = stream_connection_data(database_name,
+                    db_config_file, output_network_file,
+                    save_pkl, dict_pkl_file, users_pkl_file,
+                    table_name, connection_type, conditions,
+                    attributes, label, itersize,
+                    limit)
 
     if mode == 'networkx':
         if graph is None:
-            graph = process_dicts_nx(connections_dict, user_dict, connect_column,
-                connect_column_screen_name, connection_limit, link_type, mutual_dict,
-                mutual_pkl_file, mutual_overwrite)
+            graph = process_dicts_nx(connections_dict, user_dict, connection_limit, link_type, mutual_dict,
+                mutual_pkl_file, mutual_overwrite, edge_weight)
             nx.write_gexf(graph, output_network_file)
 
         if network_pruning:
@@ -162,22 +142,101 @@ def generate_network_gefx(database_name,
             attribute_dict={})
 
 
+def load_connection_data(input_json_dir, 
+                    output_network_file, output_columns,
+                    connect_column, connect_column_screen_name,
+                    save_pkl, dict_pkl_file, users_pkl_file, connection_type, 
+                    attributes, label):
+
+    json_files = glob(os.path.join(input_json_dir, '*.json'))
+    connections_dict = defaultdict(dict_dict)
+    username_dict = defaultdict(set_dict)
+
+    if connection_type == 'all':
+        connection_type = ['retweet', 'quote', 'reply']
+    if isinstance(connection_type, str):
+        connection_type = [connection_type]
+
+    for json_file in tqdm(json_files):
+
+        with open(json_file, 'r') as f:
+            items = json.load(f)
+
+        for item in items:
+            user_id = item['user']['id']
+            screen_name = item['user']['screen_name']
+
+            for connect in connection_type:
+                connect_user = None
+                if connect == 'retweet' and 'retweeted_status' in item:
+                    connect_user = item['retweeted_status']['user']['id']
+                    connect_screen_name = item['retweeted_status']['user']['screen_name']
+                if connect == 'quote' and 'quoted_status' in item:
+                    connect_user = item['quoted_status']['user']['id']
+                    connect_screen_name = item['quoted_status']['user']['screen_name']
+                if connect == 'reply' and item['in_reply_to_screen_name'] is not None:
+                    connect_user = item['in_reply_to_user_id']
+                    connect_screen_name = item['in_reply_to_screen_name']
+
+            if connect_user:
+                username_dict[user_id]['screen_name'].add(screen_name)
+                if 'count' not in connections_dict[user_id][connect_user]:
+                    connections_dict[user_id][connect_user]['count'] = 0
+                connections_dict[user_id][connect_user]['count'] += 1
+                username_dict[connect_user]['screen_name'].add(connect_screen_name)
+
+    if save_pkl:
+        with open(dict_pkl_file, 'wb') as openfile:
+            pickle.dump(connections_dict, openfile)
+        with open(users_pkl_file, 'wb') as openfile:
+            pickle.dump(username_dict, openfile)
+
+    return connections_dict, username_dict
+
+
 def stream_connection_data(database_name,
                 db_config_file,
                 output_gefx_file,
-                output_columns,
-                connect_column,
-                connect_column_screen_name,
-                where_statement,
                 save_pkl=True,
                 dict_pkl_file=None,
                 users_pkl_file=None,
                 table_name='tweets',
                 connection_type='retweet',
+                conditions=None,
                 attributes=None,
                 label='screen_name',
                 itersize=1000,
                 limit=None):
+
+    output_columns = set()
+    if attributes is not None:
+        output_columns += attributes
+    output_columns.update(['user_id', 'user_name', 'user_screen_name'])
+
+    tweet_type_condition = sql_statements.tweet_formats(connection_type)
+    where_statement = sql_statements.format_conditions([tweet_type_condition] + conditions)
+
+    # Wonder if this could be exported to a util function.
+    if connection_type == 'retweet':
+        output_columns.update(['retweeted_status_user_id', 'retweeted_status_user_screen_name'])
+        connect_column = 'retweeted_status_user_id'
+        connect_column_screen_name = 'retweeted_status_user_screen_name'
+    elif connection_type == 'quote':
+        output_columns.update(['quoted_status_user_id', 'quoted_status_user_screen_name'])
+        connect_column = 'quoted_status_user_id'
+        connect_column_screen_name = 'quoted_status_user_screen_name'
+    elif connection_type == 'reply':
+        output_columns.update(['in_reply_to_user_id', 'in_reply_to_user_screen_name'])
+        connect_column = 'in_reply_to_user_id'
+        connect_column_screen_name = 'in_reply_to_user_screen_name'
+    elif connection_type == 'mention':
+        raise NotImplementedError('Mentions not yet implemented')
+    elif connection_type == 'all':
+        output_columns.update(['quoted_status_user_id', 'quoted_status_user_screen_name', 
+                'retweeted_status_user_id', 'retweeted_status_user_screen_name',
+                'in_reply_to_user_id', 'in_reply_to_user_screen_name'])
+        connect_column = None
+        connect_column_screen_name = None
 
     if limit is None:
         limit_statement = sql.SQL('')
@@ -264,15 +323,15 @@ def process_dicts(input_dict, user_dict, connect_column,
     return output_data
 
 
-@profile
-def process_dicts_nx(input_dict, user_dict, connect_column,
-            connect_column_screen_name, connection_limit=20,
+# @profile
+def process_dicts_nx(input_dict, user_dict, connection_limit=20,
             connection_mode='mutual', mutual_dict=None,
-            mutual_pkl_file=None, mutual_overwrite=False):
-
-    graph = nx.DiGraph()
+            mutual_pkl_file=None, mutual_overwrite=False,
+            edge_weight=True):
 
     if connection_mode == 'direct':
+
+        graph = nx.DiGraph()
 
         for connecting_user, connecting_dict in tqdm(input_dict.items()):
             for connected_user, connected_dict in connecting_dict.items():
@@ -288,6 +347,8 @@ def process_dicts_nx(input_dict, user_dict, connect_column,
                     graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name']))) 
 
     elif connection_mode == 'mutual':
+
+        graph = nx.Graph()
 
         if mutual_dict is None or mutual_overwrite:
             mutual_dict = defaultdict(int_dict)
@@ -307,7 +368,10 @@ def process_dicts_nx(input_dict, user_dict, connect_column,
         for connecting_user, connecting_dict in tqdm(mutual_dict.items()):
             for connected_user, count in connecting_dict.items():
                 if count >= connection_limit:
-                    graph.add_edges_from([(connecting_user, connected_user)])
+                    if edge_weight:
+                        graph.add_edge(connecting_user, connected_user, weight=count)
+                    else:
+                        graph.add_edge(connecting_user, connected_user)
                     graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
                     graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name'])))
 

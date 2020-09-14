@@ -36,12 +36,13 @@ def analyze_codes(
         pairwise_stats=True,
         arb=True,
         individual_stats=True,
-        discussion=False,
-        verbose=True):
+        discussion=True,
+        verbose=True,
+        exclude=None):
 
     """ Input xlsx is expected to have the following format:
         1. A 'Codebook' sheet with vertical cols of titled codes.
-        2. Coding sheets per coder titled 'Tweets_{coder}'
+        2. Coding sheets per coder titled 'Tweets_{coder}' 
         3. Any number of unrelated sheets.
 
         Each coding sheet is expected to have, in order:
@@ -108,12 +109,13 @@ def analyze_codes(
         if colname in coders:
             past_coders = True
         if past_coders:
-            if colname not in coders:
+            if colname not in coders and colname != exclude:
                 codes_only += [colname]
     analysis_codes = [x for x in codes_only if x not in exclude_codes]
 
     if lead_code is None:
         lead_code = analysis_codes[0]
+    print(lead_code)
 
     if max_raters is None:
         max_raters = len(coders)
@@ -205,8 +207,6 @@ def write_data(
             output_row, combined, coder1, coder2, code_dict,
             code, code_hierarchy, multi_select_codes, code_groups,
             lead_code, exclude_values)
-
-        # pprint(output_row)
 
         if confusion_matrices:
             confusion_rownum = write_confusion(
@@ -325,9 +325,6 @@ def process_pair_codesheet(data_dict, coders, analysis_codes, coder1, coder2, le
     for coder, pair_coder in [[coder1, coder2], [coder2, coder1]]:
         df = data_dict[coder][coders + analysis_codes]
         df = df.astype({c: 'bool' for c in coders})
-        print(df)
-        print(coder, pair_coder)
-        print(df.shape)
         df = df[(df[coder]) & (df[pair_coder])][analysis_codes]
         df = df.rename(columns={x: f'{x}_{coder}' for x in list(df)})
         dfs += [df]
@@ -402,7 +399,7 @@ def calculate_all_scores(
             col1, col2, output_dict, code, prefix='Grouped_')
     else:
         output_row['Grouped_Agreement'] = None
-        output_row['Grouped_Cohen_Kappa'] = None    
+        output_row['Grouped_Cohen_Kappa'] = None
 
     return output_row
 
@@ -662,30 +659,36 @@ def write_discussion(dworkbook, data_dict, lead_code, codes_only, coders, analys
     # Individual Statistics
     discussion_header = ['Pair_1', 'Pair_2', 'Row'] + analysis_codes
 
-    for idx, (coder1, coder2) in enumerate(combinations(coders, 2)):
+    with open('Test_Count.csv', 'a') as f:
+        writer = csv.writer(f, delimiter=',')
 
-        discussion_sheet = dworkbook.add_worksheet(f'{coder1}_{coder2}')
-        discussion_sheet.write_row(0, 0, discussion_header)
+        for idx, (coder1, coder2) in enumerate(combinations(coders, 2)):
 
-        combined = process_pair_codesheet(
-            data_dict, coders, analysis_codes, coder1, coder2, lead_code)
+            discussion_sheet = dworkbook.add_worksheet(f'{coder1}_{coder2}')
+            discussion_sheet.write_row(0, 0, discussion_header)
 
-        rownum = 1
-        for i in tqdm(range(combined.shape[0])):
+            combined = process_pair_codesheet(
+                data_dict, coders, analysis_codes, coder1, coder2, lead_code)
 
-            row = combined.iloc[i]
-            output_row = {'Pair_1': coder1, 'Pair_2': coder2, 'Row': combined.index[i]}
-            # print(row)
+            rownum = 1
+            for i in tqdm(range(combined.shape[0])): 
 
-            if row.iloc[0:len(analysis_codes)].tolist() == row.iloc[len(analysis_codes):].tolist():
-                continue
+                row = combined.iloc[i]
+                output_row = {'Pair_1': coder1, 'Pair_2': coder2, 'Row': combined.index[i]}
 
-            for code in analysis_codes:
-                if row[f'{code}_{coder1}'] != row[f'{code}_{coder2}']:
-                    output_row[code] = ' // '.join([str(row[f'{code}_{coder1}']), str(row[f'{code}_{coder2}'])])
-            
-            write_xlsx_row(discussion_sheet, output_row, rownum, discussion_header)
-            rownum += 1
+                if row.iloc[0:len(analysis_codes)].tolist() == row.iloc[len(analysis_codes):].tolist():
+                    writer.writerow([combined.index[i], 0])
+                    continue
+
+                wrong_codes = 0
+                for code in analysis_codes:
+                    if row[f'{code}_{coder1}'] != row[f'{code}_{coder2}']:
+                        output_row[code] = ' // '.join([str(row[f'{code}_{coder1}']), str(row[f'{code}_{coder2}'])])
+                        wrong_codes += 1
+                writer.writerow([combined.index[i], wrong_codes])
+                
+                write_xlsx_row(discussion_sheet, output_row, rownum, discussion_header)
+                rownum += 1
 
     return
 
