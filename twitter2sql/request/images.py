@@ -115,7 +115,7 @@ def gather_images(input_data,
                         continue
 
                     hash_dict, img_count = save_urls(
-                        row, urls, output_directory, hash_dict, hash_columns,
+                        row, urls, output_directory, hash_columns, hash_dict,
                         all_ids, img_count, size, proxies, overwrite)
 
     except KeyboardInterrupt as e:
@@ -141,7 +141,7 @@ def save_urls(
             img_code = f'{tweet_id}_{idx}'
             save_dest = os.path.join(output_directory, f'{img_code}{ext}')
 
-            data_dict = {data[col] for col in hash_columns}
+            data_dict = {col: data[col] for col in hash_columns}
             data_dict['url'] = url
 
             if not (os.path.exists(save_dest)) or overwrite:
@@ -157,7 +157,7 @@ def save_urls(
                         if sig.hexdigest() in hash_dict:
                             hash_dict[sig.hexdigest()]['tweets'] += [data_dict]
                         else:
-                            hash_dict[sig.hexdigest()]['imgpath'] = save_dest
+                            hash_dict[sig.hexdigest()]['imgpath'] = os.path.abspath(save_dest)
                             hash_dict[sig.hexdigest()]['tweets'] = [data_dict]
                             with open(save_dest, "wb") as f:
                                 f.write(raw_data)
@@ -237,25 +237,17 @@ def extract_features(image_directory, input_hash, output_filepath, output_hashes
             if idx > limit:
                 break
 
-            for i in item:
-                target_image = glob(os.path.join(image_directory, f'{i["img_code"]}*'))
-                if target_image != []:
-                    break
-            if target_image == []:
-                continue
-
+            target_image = item["imgpath"]
             feature_hashes += [key]
 
-            input_image = target_image[0]
-
-            img = image.load_img(input_image, target_size=(224, 224))
+            img = image.load_img(target_image, target_size=(224, 224))
             img_data = image.img_to_array(img)
             img_data = np.expand_dims(img_data, axis=0)
             img_data = preprocess_input(img_data)
             output_features = model.predict(img_data)
             data_storage.append(output_features)
 
-    except:
+    except KeyboardInterrupt:
         with open(output_hashes, 'w') as fp:
             json.dump(feature_hashes, fp)
         hdf5_file.close()
@@ -270,7 +262,14 @@ def extract_features(image_directory, input_hash, output_filepath, output_hashes
 def cluster_features(
         input_hdf5, input_hash, output_directory, image_directory,
         feature_hashes, normalize=None, verbose=True,
-        remove_previous=False):
+        remove_previous=False, show_charts=False,
+        pca_components=None, n_clusters=None):
+
+    """ This function needs a little cleaning.
+    """
+
+    if show_charts:
+        matplotlib.use('TkAgg')
 
     with open(input_hash, 'r') as f:
         hash_dict = json.load(f)
@@ -278,10 +277,9 @@ def cluster_features(
     with open(feature_hashes, 'r') as f:
         feature_hashes = json.load(f)
 
-    matplotlib.use('TkAgg')
-
     if verbose:
         print('Open data...')
+        np.set_printoptions(suppress=True)
 
     open_hdf5 = tables.open_file(input_hdf5, "r")
     data = getattr(open_hdf5.root, 'features')
@@ -289,28 +287,70 @@ def cluster_features(
 
     if verbose and normalize:
         print('Normalize data...')
-    # data = preprocessing.normalize(data, norm='l2')
-    # data = StandardScaler().fit_transform(data)
-    print(data.shape)
-    np.set_printoptions(suppress=True)
+        data = preprocessing.normalize(data, norm='l2')
+        data = StandardScaler().fit_transform(data)
 
-    print('Dimension Reduction...')
-    pca_components = 100
-    pca = PCA(n_components=pca_components, random_state=728).fit(data.T)
-    pca_features = pca.components_.T
-    print(sum(pca.explained_variance_ratio_[0:pca_components]))
-    # pca_features = manifold.TSNE(n_components=2, init='pca', perplexity=25,
-             # random_state=0).fit_transform(data)
-    # pca_features = UMAP(min_dist=.01, verbose=True, n_neighbors=20).fit_transform(data)
-    print(pca_features.shape)
+    if verbose:
+        print('Dimension Reduction...')
 
-    # image_scatter_plot(pca_features, hash_dict, feature_hashes, image_directory)
-    # raise 
+    if pca_components is None:
 
-    print('Clustering...')
-    thresh = 1
+        # Take the number of PCA responsible for 90% variation.
+        # Don't know if this works :)
+        pca = PCA(n_components=min([100] + list(data.shape)), random_state=728).fit(data.T)
+        variance = pca.explained_variance_ratio_
+        sum_pca = 0
+        pca_components = 0
+        for var in variance:
+            sum_pca += var
+            pca_components += 1
+            if sum_pca > .9:
+                break
+
+        if verbose:
+            print(f'PCA Component Num Estimated At: {pca_components}')
+
+        pca_features = pca.components_.T
+        pca_features = pca_features[:, 0:pca_components]
+    else:
+        pca = PCA(n_components=min([pca_components] + list(data.shape)), random_state=728).fit(data.T)
+        pca_features = pca.components_.T
+
+    if verbose:
+        print('Clustering...')
+
+    if n_clusters is None:
+        sum_of_squared_distances = []
+        K = range(2, min(500, pca_features.shape[0]))
+
+        if verbose:
+            print('Estimating Cluster Num...')
+            pbar = tqdm(K)
+        else:
+            pbar = range(K)
+
+        for k in pbar:
+            km = KMeans(n_clusters=k)
+            km = km.fit(pca_features)
+            sum_of_squared_distances.append(silhouette_score(pca_features, km.labels_))
+
+        plt.plot(K, sum_of_squared_distances, 'bx-')
+        plt.xlabel('k')
+        plt.ylabel('Sum_of_squared_distances')
+        plt.title('Elbow Method For Optimal k')
+
+        if show_charts:
+            plt.show()
+
+        n_clusters = np.argmax(sum_of_squared_distances)
+
+        if verbose:
+            print(f'Chosen Cluster Num: {n_clusters}')
+        # plt.savefig("optimal_k.png")
+
+    clusters = KMeans(n_clusters=n_clusters, random_state=0).fit(pca_features)
+    # thresh = 1
     # clusters = hcluster.fclusterdata(data, thresh, criterion="distance")
-    # clusters = KMeans(n_clusters=180, random_state=0).fit(pca_features)
     # connectivity = kneighbors_graph(pca_features, n_neighbors=10)
     # connectivity = 0.5 * (connectivity + connectivity.T)
     # clusters = AgglomerativeClustering(n_clusters=100,
@@ -318,62 +358,33 @@ def cluster_features(
     # clusters = DBSCAN(eps=.2).fit(pca_features)
     # clusters = SpectralClustering(n_clusters=20, eigen_solver='arpack', affinity="nearest_neighbors").fit(pca_features)
 
-    # sum_of_squared_distances = []
-    K = range(2, 500)
-    for k in tqdm(K):
-        km = KMeans(n_clusters=k)
-        km = km.fit(pca_features)
-        # sum_of_squared_distances.append(km.inertia_)
-        sum_of_squared_distances.append(silhouette_score(pca_features, km.labels_))
-        print(sum_of_squared_distances[-1])
-    plt.plot(K, sum_of_squared_distances, 'bx-')
-    plt.xlabel('k')
-    plt.ylabel('Sum_of_squared_distances')
-    plt.title('Elbow Method For Optimal k')
-    # plt.savefig("optimal_k.png")
-    plt.show()
-    raise
-    # clusters = [1] * pca_features.shape[0]
-
     clusters = clusters.labels_
     counts = Counter(clusters)
     counts = [[key, val] for key, val in counts.items()]
-    print(counts)
-    print(clusters)
-    print(len(set(clusters)))
+    # print(counts)
+    # print(clusters)
+    # print(len(set(clusters)))
 
-    # plt.figure(figsize=(45, 45))
-    # plt.scatter(pca_features[:, 0], pca_features[:, 1], c=clusters)
-    # plt.axis("equal")
-    # title = "threshold: %f, number of clusters: %d" % (thresh, len(set(clusters)))
-    # plt.title(title)
-    # plt.show()
+    if show_charts:
+        plt.figure(figsize=(45, 45))
+        plt.scatter(pca_features[:, 0], pca_features[:, 1], c=clusters)
+        plt.axis("equal")
+        title = "threshold: %f, number of clusters: %d" % (thresh, len(set(clusters)))
+        plt.title(title)
+        plt.show()
     # plt.savefig("clusters.png")
-    # raise
-    # raise
 
     sorted_cluster_idx = np.argsort(clusters)
-    # all_images = glob(os.path.join(image_directory, '*'))
 
-    # hashes = list(hash_dict.items())
-    # for idx in sorted_cluster_idx:
-    #     cluster = clusters[idx]
-    #     key, item = 
-    # raise
     if not os.path.exists(output_directory):
         os.mkdir(output_directory)
     elif remove_previous:
         rmtree(output_directory)
         os.mkdir(output_directory)
 
-    # for idx in tqdm(sorted_cluster_idx):
-
-        # key = feature_hashes[idx]
-        # cluster = clusters[idx]
-
     for cluster, count in tqdm(reversed(counts)):
 
-        print(cluster, count)
+        # print(cluster, count)
         indices = [i for i, x in enumerate(clusters) if x == cluster]
 
         for idx in indices:
@@ -387,37 +398,47 @@ def cluster_features(
             if not os.path.exists(cluster_directory):
                 os.mkdir(cluster_directory)
 
-            for i in hash_dict[key]:
-                target_image = glob(os.path.join(image_directory, f'{i["img_code"]}*'))
-                if target_image != []:
-                    break
+            target_image = hash_dict[key]["imgpath"]
 
-            copy(target_image[0], os.path.join(cluster_directory, os.path.basename(target_image[0])))
-
-    # # plotting
-    # plt.scatter(*np.transpose(data), c=clusters)
-    # plt.axis("equal")
-    # title = "threshold: %f, number of clusters: %d" % (thresh, len(set(clusters)))
-    # plt.title(title)
-    # plt.show()
-
-    # raise
-    # kmeans = KMeans(n_clusters=2, random_state=0).fit(vgg16_feature_list_np)
+            copy(target_image, os.path.join(cluster_directory, os.path.basename(target_image)))
 
     return
 
 
 def image_scatter_plot(tsne, hash_dict, feature_hashes, image_directory, figsize=(45,45)):
 
+    if show_charts:
+        matplotlib.use('TkAgg')
+
+    with open(input_hash, 'r') as f:
+        hash_dict = json.load(f)
+
+    with open(feature_hashes, 'r') as f:
+        feature_hashes = json.load(f)
+
+    if verbose:
+        print('Open data...')
+        np.set_printoptions(suppress=True)
+
+    open_hdf5 = tables.open_file(input_hdf5, "r")
+    data = getattr(open_hdf5.root, 'features')
+    data = data.read().reshape(data.shape[0], -1)
+
+    if verbose and normalize:
+        print('Normalize data...')
+        data = preprocessing.normalize(data, norm='l2')
+        data = StandardScaler().fit_transform(data)
+
+    # pca_features = manifold.TSNE(n_components=2, init='pca', perplexity=25,
+             # random_state=0).fit_transform(data)
+    # pca_features = UMAP(min_dist=.01, verbose=True, n_neighbors=20).fit_transform(data)
+    # image_scatter_plot(pca_features, hash_dict, feature_hashes, image_directory)
+
     images = []
 
     for feature_hash in tqdm(feature_hashes):
 
-        for i in hash_dict[feature_hash]:
-            image_path = glob(os.path.join(image_directory, f'{i["img_code"]}*'))
-            if image_path != []:
-                break
-        image_path = image_path[0]
+        image_path = hash_dict[feature_hash]["imgpath"]
 
         image = cv2.imread(image_path, cv2.IMREAD_COLOR)
         
