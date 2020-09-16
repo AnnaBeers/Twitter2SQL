@@ -17,7 +17,7 @@ from twitter2sql.core.util import open_database, save_to_csv, \
 from twitter2sql.core import sql_statements
 
 
-def generate_network_gefx(database_name=None,
+def generate_network_gexf(database_name=None,
                 db_config_file=None,
                 input_json_dir=None,
                 output_network_file=None,
