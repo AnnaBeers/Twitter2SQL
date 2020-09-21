@@ -1,6 +1,25 @@
 import json
+import pandas as pd
 
 from pprint import pprint
+
+
+def load_json(input_json, output_type='dict'):
+
+    # Should probably check this at the format level.
+    if input_json.endswith('json'):
+        with open(input_json, 'r') as f:
+            data = json.load(f)
+    else:
+        with open(input_json, 'r') as f:
+            data = [json.loads(jline) for jline in list(f)]
+
+    return data
+
+
+def extract_mentions(input_data):
+
+    return
 
 
 def extract_images(input_data, types=['photo']):

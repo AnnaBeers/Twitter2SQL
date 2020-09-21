@@ -45,6 +45,7 @@ def gather_images(input_data,
                 input_type='json',
                 size='large',
                 hash_columns=['id', 'user_id', 'created_at'],
+                image_types=['photo'],
                 original_only=False,
                 proxies=None,
                 timeout=None,
@@ -55,7 +56,7 @@ def gather_images(input_data,
     if not os.path.exists(output_directory):
         os.mkdir(output_directory)
 
-    if os.path.exists(hash_output):
+    if os.path.exists(hash_output) and not overwrite_hash:
         with open(hash_output, 'r') as f:
             hash_dict = json.load(f)
         hash_dict = defaultdict(dict, hash_dict)
@@ -89,7 +90,7 @@ def gather_images(input_data,
                     tweet_count += 1
                     pbar.set_description(f'Total tweets {tweet_count}, Total images {img_count}, Hashes {len(hash_dict)}')
 
-                    urls = json_util.extract_images(data)
+                    urls = json_util.extract_images(data, types=image_types)
                     tweet_id = data['id_str']
 
                     hash_dict, img_count = save_urls(
@@ -109,7 +110,7 @@ def gather_images(input_data,
                     tweet_count = len(tweet_ids)
                     pbar.set_description(f'Total tweets {tweet_count}, Total images {img_count}, Hashes {len(hash_dict)}')
 
-                    if row['extended_type'] == 'photo':
+                    if row['extended_type'] in image_types:
                         urls = [row['extended_url']]
                     else:
                         continue

@@ -13,7 +13,9 @@ from itertools import combinations
 from glob import glob
 
 from twitter2sql.core.util import open_database, save_to_csv, \
-        to_list_of_dicts, to_pandas, set_dict, int_dict, dict_dict
+        to_list_of_dicts, to_pandas, set_dict, int_dict, dict_dict, \
+        twitter_str_to_dt
+from twitter2sql.core.json_util import load_json
 from twitter2sql.core import sql_statements
 
 
@@ -36,6 +38,7 @@ def generate_network_gexf(database_name=None,
                 attributes=None,
                 label='screen_name',
                 connection_limit=10,
+                mutual_limit=5,
                 network_pruning=10,
                 itersize=1000,
                 limit=None,
@@ -90,7 +93,7 @@ def generate_network_gexf(database_name=None,
     if mode == 'networkx':
         if graph is None:
             graph = process_dicts_nx(connections_dict, user_dict, connection_limit, link_type, mutual_dict,
-                mutual_pkl_file, mutual_overwrite, edge_weight)
+                mutual_pkl_file, mutual_overwrite, edge_weight, mutual_limit)
             nx.write_gexf(graph, output_network_file)
 
         if network_pruning:
@@ -142,13 +145,12 @@ def generate_network_gexf(database_name=None,
             attribute_dict={})
 
 
-def load_connection_data(input_json_dir, 
-                    output_network_file, output_columns,
-                    connect_column, connect_column_screen_name,
-                    save_pkl, dict_pkl_file, users_pkl_file, connection_type, 
-                    attributes, label):
+def load_connection_data(input_json_dir,
+                    output_network_file,
+                    save_pkl=True, dict_pkl_file=None, users_pkl_file=None, connection_type='retweet',
+                    attributes=None, label='screen_name'):
 
-    json_files = glob(os.path.join(input_json_dir, '*.json'))
+    json_files = glob(os.path.join(input_json_dir, '*.json*'))
     connections_dict = defaultdict(dict_dict)
     username_dict = defaultdict(set_dict)
 
@@ -156,34 +158,56 @@ def load_connection_data(input_json_dir,
         connection_type = ['retweet', 'quote', 'reply']
     if isinstance(connection_type, str):
         connection_type = [connection_type]
+    if isinstance(attributes, str):
+        attributes = [attributes]
 
     for json_file in tqdm(json_files):
 
-        with open(json_file, 'r') as f:
-            items = json.load(f)
+        items = load_json(json_file)
 
         for item in items:
+            # pprint(item)
             user_id = item['user']['id']
             screen_name = item['user']['screen_name']
 
+            connect_users = []
+            connect_screen_names = []
             for connect in connection_type:
                 connect_user = None
                 if connect == 'retweet' and 'retweeted_status' in item:
-                    connect_user = item['retweeted_status']['user']['id']
-                    connect_screen_name = item['retweeted_status']['user']['screen_name']
+                    connect_users += [item['retweeted_status']['user']['id']]
+                    connect_screen_names += [item['retweeted_status']['user']['screen_name']]
                 if connect == 'quote' and 'quoted_status' in item:
-                    connect_user = item['quoted_status']['user']['id']
-                    connect_screen_name = item['quoted_status']['user']['screen_name']
+                    connect_users += [item['quoted_status']['user']['id']]
+                    connect_screen_names += [item['quoted_status']['user']['screen_name']]
                 if connect == 'reply' and item['in_reply_to_screen_name'] is not None:
-                    connect_user = item['in_reply_to_user_id']
-                    connect_screen_name = item['in_reply_to_screen_name']
+                    connect_users += [item['in_reply_to_user_id']]
+                    connect_screen_names += [item['in_reply_to_screen_name']]
+                if connect == 'mention':
+                    if 'user_mentions' in item['entities']:
+                        user_dict = {x['id']: x['screen_name'] for x in item['entities']['user_mentions']}
+                        text = item['full_text']
+                        if 'retweeted_status' in item:
+                            text = str.split(text, 'RT ')[0]  # This will fail sometimes
 
-            if connect_user:
+                        if user_dict:
+                            # Redundant
+                            user_ids = [x for x in user_dict if f'@{user_dict[x]}' in text]
+                            for uid in user_ids:
+                                connect_users += [uid]
+                                connect_screen_names += [user_dict[uid]]
+
+            if connect_users:
                 username_dict[user_id]['screen_name'].add(screen_name)
-                if 'count' not in connections_dict[user_id][connect_user]:
-                    connections_dict[user_id][connect_user]['count'] = 0
-                connections_dict[user_id][connect_user]['count'] += 1
-                username_dict[connect_user]['screen_name'].add(connect_screen_name)
+                for connect_user, connect_screen_name in zip(connect_users, connect_screen_names):
+                    if 'count' not in connections_dict[user_id][connect_user]:
+                        connections_dict[user_id][connect_user]['count'] = 0
+                    connections_dict[user_id][connect_user]['count'] += 1
+                    username_dict[connect_user]['screen_name'].add(connect_screen_name)
+                    if attributes is not None:
+                        for attribute in attributes:
+                            connections_dict[user_id][connect_user][attribute] = item[attribute]
+
 
     if save_pkl:
         with open(dict_pkl_file, 'wb') as openfile:
@@ -200,7 +224,7 @@ def stream_connection_data(database_name,
                 save_pkl=True,
                 dict_pkl_file=None,
                 users_pkl_file=None,
-                table_name='tweets',
+                table_name='tweet',
                 connection_type='retweet',
                 conditions=None,
                 attributes=None,
@@ -327,7 +351,7 @@ def process_dicts(input_dict, user_dict, connect_column,
 def process_dicts_nx(input_dict, user_dict, connection_limit=20,
             connection_mode='mutual', mutual_dict=None,
             mutual_pkl_file=None, mutual_overwrite=False,
-            edge_weight=True):
+            edge_weight=True, mutual_limit=5):
 
     if connection_mode == 'direct':
 
@@ -335,16 +359,48 @@ def process_dicts_nx(input_dict, user_dict, connection_limit=20,
 
         for connecting_user, connecting_dict in tqdm(input_dict.items()):
             for connected_user, connected_dict in connecting_dict.items():
+                if connecting_user == connected_user:
+                    continue
                 if connected_dict['count'] >= connection_limit:
-                    if connecting_user == connected_user:
-                        continue
-                    graph.add_edges_from([(connecting_user, connected_user)])
-                    # graph.add_weighted_edges_from([(connecting_user, connected_user, connected_dict['count'])])
+                    
+                    if edge_weight:
+                        graph.add_edge(connecting_user, connected_user, weight=connected_dict['count'])
+                    else:
+                        graph.add_edge(connecting_user, connected_user)
+
                     for key, value in connected_dict.items():
                         if key != 'count':
                             graph[connecting_user][connected_user][key] = value
                     graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
                     graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name']))) 
+
+    elif connection_mode == 'reciprocal':
+
+        graph = nx.Graph()
+
+        for connecting_user, connecting_dict in tqdm(input_dict.items()):
+            for connected_user, connected_dict in connecting_dict.items():
+                if connecting_user == connected_user:
+                    continue
+                connect_count = connected_dict['count']
+                if connect_count >= connection_limit:
+                    if connected_user not in input_dict:
+                        continue
+                    if connecting_user not in input_dict[connected_user]:
+                        continue
+                    connected_count = input_dict[connected_user][connecting_user]['count']
+                    if connected_count >= connection_limit:
+
+                        if edge_weight:
+                            graph.add_edge(connecting_user, connected_user, weight=min(connect_count, connected_count))
+                        else:
+                            graph.add_edge(connecting_user, connected_user)
+
+                        for key, value in connected_dict.items():
+                            if key != 'count':
+                                graph[connecting_user][connected_user][key] = value
+                        graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
+                        graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name']))) 
 
     elif connection_mode == 'mutual':
 
@@ -354,7 +410,7 @@ def process_dicts_nx(input_dict, user_dict, connection_limit=20,
             mutual_dict = defaultdict(int_dict)
             pbar = tqdm(input_dict.items())
             for connecting_user, connecting_dict in pbar:
-                connected_users = [key for key, val in connecting_dict.items() if val['count'] > 4]
+                connected_users = [key for key, val in connecting_dict.items() if val['count'] >= mutual_limit]
                 pairs = list(combinations(connected_users, 2))
                 pbar.set_description("Mutual dict %s" % len(mutual_dict))
                 for pair in pairs:
@@ -383,6 +439,36 @@ def prune_data(output_data, network_size):
     return
 
 
+def add_dynamic_attributes(input_dict, output_dict=None, interval=None):
+
+    if output_dict is None:
+        output_dict = input_dict
+
+    print('Loading input dict')
+    with open(input_dict, 'rb') as openfile:
+        input_dict = pickle.load(openfile)
+
+    last_date = None
+    for connecting_user, connecting_dict in tqdm(input_dict.items()):
+        for connected_user, connected_dict in connecting_dict.items():
+            date = twitter_str_to_dt(connected_dict['created_at']).timestamp()
+            if last_date is None:
+                last_date = date
+            elif date > last_date:
+                last_date = date
+            del connected_dict['created_at']
+            connected_dict['start'] = date
+
+    for connecting_user, connecting_dict in tqdm(input_dict.items()):
+        for connected_user, connected_dict in connecting_dict.items():
+            connected_dict['end'] = last_date    
+
+    with open(output_dict, 'wb') as openfile:
+        pickle.dump(input_dict, openfile)
+
+    return
+
+
 def create_gexf(input_data, output_filename,
         id_col='user_id',
         edge_col='in_reply_to_user_id',
@@ -392,10 +478,16 @@ def create_gexf(input_data, output_filename,
         dynamic=False,
         time_col='created_ts',
         attribute_dict=None):
+
+    """ Currently non-functional
+    """
+
+    raise NotImplementedError
+
     attr_qname = etree.QName("http://www.w3.org/2001/XMLSchema-instance", "schemaLocation")
 
     gexf = etree.Element('gexf',
-                         {attr_qname: 'http://www.gexf.net/1.3draft  http://www.gexf.net/1.3draft/gexf.xsd'},
+                         {attr_qname: 'http://www.gexf.net/1.3  http://www.gexf.net/1.3/gexf.xsd'},
                          nsmap={None: 'http://graphml.graphdrawing.org/xmlns/graphml'},
                          version='1.3')
 
@@ -418,7 +510,8 @@ def create_gexf(input_data, output_filename,
     nodes = etree.SubElement(graph, 'nodes')
     edges = etree.SubElement(graph, 'edges')
 
-    for item in tqdm(input_data):
+    # for item in tqdm(input_data):
+    for idx, row in tqdm(list(input_data.iterrows())):
 
         item = {key: str(value) for key, value in item.items()}
 

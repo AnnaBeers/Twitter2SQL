@@ -426,10 +426,6 @@ def date_range(date_range, date_column='created_at'):
 
 def in_values(col, values):
 
-    """ Requires you to fill in the dates in a subsequent step.
-        Think about how to do this in a simple way.
-    """
-
     # This is a bit suspect.
     value_string = ''
     for item in values:
@@ -501,7 +497,7 @@ def tweet_formats(formats):
 
 def text_search(words, colname='tweet'):
 
-    output_statement = sql.SQL(' OR ').join([sql.SQL(f"{colname} ILIKE '{word}'") for word in words])
+    output_statement = sql.SQL('(') + sql.SQL(' OR ').join([sql.SQL(f"{colname} ILIKE '{word}'") for word in words]) + sql.SQL(')')
 
     return output_statement
 
@@ -535,3 +531,15 @@ def list_tables():
         """
 
     return sql.SQL(statement)
+
+
+def list_columns(table_name):
+
+    statement = sql.SQL("""
+        SELECT *
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = '{table_name}'
+        """).format(table_name=sql.SQL(table_name))
+
+    return statement
