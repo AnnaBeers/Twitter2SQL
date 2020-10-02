@@ -569,5 +569,9 @@ def add_edge(item, nodes, edges,
     return node, edge_node
 
 
+def combine_connections_data():
+    raise NotImplementedError
+
+
 if __name__ == '__main__':
     pass
