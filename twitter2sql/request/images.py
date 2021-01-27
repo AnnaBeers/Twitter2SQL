@@ -322,7 +322,7 @@ def cluster_features(
 
     if n_clusters is None:
         sum_of_squared_distances = []
-        K = range(2, min(500, pca_features.shape[0]))
+        K = range(2, min(200, pca_features.shape[0]))
 
         if verbose:
             print('Estimating Cluster Num...')
@@ -347,7 +347,7 @@ def cluster_features(
 
         if verbose:
             print(f'Chosen Cluster Num: {n_clusters}')
-        # plt.savefig("optimal_k.png")
+        plt.savefig("optimal_k.png")
 
     clusters = KMeans(n_clusters=n_clusters, random_state=0).fit(pca_features)
     # thresh = 1

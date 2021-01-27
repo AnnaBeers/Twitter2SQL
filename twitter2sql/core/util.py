@@ -222,12 +222,19 @@ def to_list_of_dicts(cursor):
     return dict_result
 
 
-def to_pandas(cursor):
+def to_pandas(cursor, dtype=None):
 
     results = cursor.fetchall()
 
     column_headers = list(results[0].keys())
-    data_frame = pd.DataFrame(results)
+    if not dtype:
+        data_frame = pd.DataFrame(results)
+    else:
+        new_results = []
+        for result in results:
+            new_results += [[str(x) if x else None for x in result]]
+        data_frame = pd.DataFrame(new_results, dtype='str')
+        
     data_frame.columns = column_headers
 
     return data_frame

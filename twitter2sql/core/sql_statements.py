@@ -413,13 +413,13 @@ def date_range(date_range, date_column='created_at'):
     if date_range is None:
         return sql.SQL('')
     if date_range[0] is None:
-        date = date_range[1].strftime("%Y-%m-%d")
+        date = date_range[1].strftime("%Y-%m-%d %H:%M:%S")
         return sql.SQL(f"{date_column} < '{date}'")
     elif date_range[1] is None:
-        date = date_range[0].strftime("%Y-%m-%d")
+        date = date_range[0].strftime("%Y-%m-%d %H:%M:%S")
         return sql.SQL(f"{date_column} > '{date}'")
     else:
-        date_range = [d.strftime('%Y-%m-%d') for d in date_range]
+        date_range = [d.strftime('%Y-%m-%d %H:%M:%S') for d in date_range]
         return sql.SQL(f"{date_column} < '{date_range[1]}' \
             AND {date_column} > '{date_range[0]}'")
 
@@ -495,9 +495,12 @@ def tweet_formats(formats):
     return output_statement
 
 
-def text_search(words, colname='tweet'):
+def text_search(words, colname='tweet', contains=True):
 
-    output_statement = sql.SQL('(') + sql.SQL(' OR ').join([sql.SQL(f"{colname} ILIKE '{word}'") for word in words]) + sql.SQL(')')
+    if contains:
+        output_statement = sql.SQL('(') + sql.SQL(' OR ').join([sql.SQL(f"{colname} ILIKE '{word}'") for word in words]) + sql.SQL(')')
+    else:
+        output_statement = sql.SQL('(') + sql.SQL(' OR ').join([sql.SQL(f"{colname} NOT ILIKE '{word}'") for word in words]) + sql.SQL(')')
 
     return output_statement
 

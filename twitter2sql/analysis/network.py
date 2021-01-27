@@ -208,7 +208,6 @@ def load_connection_data(input_json_dir,
                         for attribute in attributes:
                             connections_dict[user_id][connect_user][attribute] = item[attribute]
 
-
     if save_pkl:
         with open(dict_pkl_file, 'wb') as openfile:
             pickle.dump(connections_dict, openfile)

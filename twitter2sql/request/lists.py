@@ -48,7 +48,10 @@ def add_to_list(api, input_ids, list_id):
 
     for idx, uid in enumerate(tqdm(input_ids)):
         print(list_id, uid)
-        api.add_list_member(list_id=str(list_id), user_id=uid)
+        try:
+            api.add_list_member(list_id=str(list_id), user_id=uid)
+        except Exception as e:
+            print(e)
 
     return None
 

@@ -39,8 +39,9 @@ def export_reply_threads(database_name,
         reply_range=[1, 10000000000000],
         verbose=False,
         output_type='csv',
-        output_filepath=None):
-
+        output_filepath=None,
+        replies_table=None,
+        seed_table=None):
 
     """ If not seed database is provided, we assume that you are pulling your seed posts
     from the same database your are pulling replies from.
@@ -77,20 +78,30 @@ def export_reply_threads(database_name,
         select_columns = select_columns + ['in_reply_to_status_id']
     select_columns.insert(0, select_columns.pop(select_columns.index('id')))
 
+    """ Postgres hasn't been using indexes for me recently. This forces it to.
+    """
+    sql_statement = sql.SQL("""
+        SET enable_seqscan = OFF;
+        """)
+
+    cursor.execute(sql_statement)
+
+    header = select_columns + ['path', 'depth', 'is_seed', 'seed_id']
+
     """ Step 2, retrieve the replies and write them to a csv document.
     """
     if output_type == 'csv':
         with open(output_filepath, 'w') as openfile:
 
             writer = csv.writer(openfile, delimiter=',')
-            writer.writerow(select_columns + ['path', 'depth', 'is_seed'])
+            writer.writerow(header)
      
             for seed_post in tqdm(seed_posts):
 
                 """ First, write the row for your seed post. The last three columns are only applicable
                     for replies, so fill them with dummy values.
                 """
-                writer.writerow([seed_post[key] for key in select_columns] + ['NONE', 1, 'TRUE'])
+                writer.writerow([seed_post[key] for key in select_columns] + ['NONE', 1, 'TRUE', seed_post['id']])
 
                 """ Then, pull the replies! See the get_reply_thread function for more.
                 """
@@ -131,8 +142,39 @@ def export_reply_threads(database_name,
 
             pickle.dump(thread_networks, openfile)
 
+    elif output_type == 'database':
 
-def get_seed_posts(cursor, seed_limit, seed_conditions, 
+        for seed_post in tqdm(seed_posts):
+
+            """ Then, pull the replies! See the get_reply_thread function for more.
+            """
+            results = get_reply_thread(cursor, seed_post, table_name, select_columns,
+                    reply_range, verbose)
+
+            """ Insert into table. Parameters are currently hard-coded.
+            """
+            header_value = [seed_post[key] for key in select_columns] + [1, str(seed_post['id']), 'TRUE', seed_post['id']]
+            cursor.execute("""INSERT INTO governor_replies (id,tweet,user_id,user_name,
+                user_screen_name,created_at,in_reply_to_user_id,
+                in_reply_to_user_screen_name,in_reply_to_status_id,
+                depth,path,is_seed,seed_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, tuple(header_value))
+
+            if results:
+                input_values = [list(result.values()) + ['FALSE'] for result in results]
+                for input_value in input_values:
+                    cursor.execute("""INSERT INTO governor_replies (id,tweet,user_id,user_name,
+                        user_screen_name,created_at,in_reply_to_user_id,
+                        in_reply_to_user_screen_name,in_reply_to_status_id,
+                        depth,path,is_seed,seed_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, tuple(input_value + [seed_post['id']]))
+
+            database.commit()
+
+        return
+
+
+def get_seed_posts(cursor, seed_limit, seed_conditions,
             select_columns, seed_random_percent, seed_table_name,
             verbose=False):
 
@@ -159,12 +201,12 @@ def get_seed_posts(cursor, seed_limit, seed_conditions,
                 seed_limit=seed_limit,
                 seed_conditions=seed_conditions,
                 select_columns=select_columns_sql)
-    
+
     # This will print the SQL statement as-computed, so you can test it separately.
     if verbose:
         print(sql_statement.as_string(cursor))
 
-    cursor.execute(sql_statement)  
+    cursor.execute(sql_statement)
     seed_posts = to_list_of_dicts(cursor)
 
     return seed_posts
@@ -199,12 +241,12 @@ def get_reply_thread(cursor, seed_post, table_name, select_columns,
     post_id = seed_post['id']
     sql_statement = sql.SQL("""
         WITH RECURSIVE recursive_tweets({select_columns}, depth, path) AS (
-        SELECT {seed_post}::bigint AS id, 
+        SELECT {seed_post}::bigint AS id,
         {column_types}
         1::INT AS depth,
         {seed_post}::TEXT AS path
         UNION ALL
-        SELECT {select_columns_child}, p.depth + 1 AS depth, (p.path || '->' || c.id::TEXT) 
+        SELECT {select_columns_child}, p.depth + 1 AS depth, (p.path || '->' || c.id::TEXT)
         FROM recursive_tweets AS p, {table_name} AS c WHERE c.in_reply_to_status_id = p.id
         )
         SELECT * FROM recursive_tweets AS n;
