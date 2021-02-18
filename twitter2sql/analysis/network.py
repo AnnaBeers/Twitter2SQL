@@ -370,8 +370,8 @@ def process_dicts_nx(input_dict, user_dict, connection_limit=20,
                     for key, value in connected_dict.items():
                         if key != 'count':
                             graph[connecting_user][connected_user][key] = value
-                    graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
-                    graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name']))) 
+                    graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])), dataset=user_dict[connecting_user]['dataset'])
+                    graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name'])), dataset=user_dict[connected_user]['dataset']) 
 
     elif connection_mode == 'reciprocal':
 
@@ -427,6 +427,8 @@ def process_dicts_nx(input_dict, user_dict, connection_limit=20,
                         graph.add_edge(connecting_user, connected_user, weight=count)
                     else:
                         graph.add_edge(connecting_user, connected_user)
+                    # graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])), dataset=user_dict[connecting_user]['dataset'])
+                    # graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name'])), dataset=user_dict[connected_user]['dataset'])
                     graph.add_node(connecting_user, label=next(iter(user_dict[connecting_user]['screen_name'])))
                     graph.add_node(connected_user, label=next(iter(user_dict[connected_user]['screen_name'])))
 

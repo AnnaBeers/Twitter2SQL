@@ -439,10 +439,13 @@ def in_values(col, values):
     return sql_statement
 
 
-def format_conditions(conditions, join_str=' AND '):
+def format_conditions(conditions, join_str=' AND ', where=True):
 
     if conditions:
-        return sql.SQL('WHERE ') + sql.SQL(join_str).join(conditions)
+        if where:
+            return sql.SQL('WHERE ') + sql.SQL(join_str).join(conditions)
+        else:
+            return sql.SQL(join_str).join(conditions)
     else:
         return sql.SQL('')
 
