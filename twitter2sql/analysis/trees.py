@@ -29,7 +29,7 @@ def export_reply_threads(database_name,
         select_columns=['tweet', 'user_id', 'user_name',
          'user_screen_name', 'created_at', 
         'in_reply_to_user_id', 'in_reply_to_user_screen_name',
-        'in_reply_to_status_id'],
+        'in_reply_to_status_id', 'user_followers_count'],
         seed_conditions=None,
         seed_db_config_file=None,
         seed_database_name=None,
@@ -41,7 +41,8 @@ def export_reply_threads(database_name,
         output_type='csv',
         output_filepath=None,
         replies_table=None,
-        seed_table=None):
+        seed_table=None,
+        output_table=None):
 
     """ If not seed database is provided, we assume that you are pulling your seed posts
     from the same database your are pulling replies from.
@@ -58,15 +59,10 @@ def export_reply_threads(database_name,
     seed_database, seed_cursor = open_database(seed_database_name, seed_db_config_file)
     database, cursor = open_database(database_name, db_config_file)
 
-    """ I have a variable, select_columns, which determines which columns users want returned in
-    this process. The 'id' column, however, is necessary for this whole operation to work, so I
-    add it here as a check on the user (me) who might forget it.
+    """ Step 1, get the seed posts! Check the function below this one for additional documentation.
     """
     if 'id' not in select_columns:
         select_columns = select_columns + ['id']
-
-    """ Step 1, get the seed posts! Check the function below this one for additional documentation.
-    """
     seed_posts = get_seed_posts(seed_cursor, seed_limit, seed_conditions, select_columns,
             seed_random_percent, seed_table_name, verbose)
 
@@ -74,18 +70,19 @@ def export_reply_threads(database_name,
     are in select_columns, and makes sure that the 'id' column is the first one in
     select_columns. This is over-complicated, and should probably be revised later :).
     """
-    if 'id' not in select_columns:
+    if 'in_reply_to_status_id' not in select_columns:
         select_columns = select_columns + ['in_reply_to_status_id']
     select_columns.insert(0, select_columns.pop(select_columns.index('id')))
 
-    """ Postgres hasn't been using indexes for me recently. This forces it to.
+    """ Postgres hasn't been using indexes for me recently. This forces it to. TODO: Fix
+        or parameterize.
     """
     sql_statement = sql.SQL("""
         SET enable_seqscan = OFF;
         """)
-
     cursor.execute(sql_statement)
 
+    reply_index = 0
     header = select_columns + ['path', 'depth', 'is_seed', 'seed_id']
 
     """ Step 2, retrieve the replies and write them to a csv document.
@@ -144,6 +141,8 @@ def export_reply_threads(database_name,
 
     elif output_type == 'database':
 
+        select_columns_sql = sql_statements.select_cols(select_columns + ['depth', 'path', 'is_seed', 'seed_id', 'order_id'])
+
         for seed_post in tqdm(seed_posts):
 
             """ Then, pull the replies! See the get_reply_thread function for more.
@@ -153,21 +152,26 @@ def export_reply_threads(database_name,
 
             """ Insert into table. Parameters are currently hard-coded.
             """
-            header_value = [seed_post[key] for key in select_columns] + [1, str(seed_post['id']), 'TRUE', seed_post['id']]
-            cursor.execute("""INSERT INTO governor_replies (id,tweet,user_id,user_name,
-                user_screen_name,created_at,in_reply_to_user_id,
-                in_reply_to_user_screen_name,in_reply_to_status_id,
-                depth,path,is_seed,seed_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, tuple(header_value))
+            header_value = [seed_post[key] for key in select_columns] + [1, str(seed_post['id']), 'TRUE', seed_post['id'], reply_index]
+            sql_statement = sql.SQL("INSERT INTO {output_table} ({select_cols}) VALUES (" + ', '.join(['%s'] * len(header_value)) + ")"). \
+                    format(select_cols=select_columns_sql,
+                            output_table=sql.SQL(output_table))
+            cursor.execute(sql_statement, tuple(header_value))
+
+            reply_index += 1
 
             if results:
-                input_values = [list(result.values()) + ['FALSE'] for result in results]
-                for input_value in input_values:
-                    cursor.execute("""INSERT INTO governor_replies (id,tweet,user_id,user_name,
-                        user_screen_name,created_at,in_reply_to_user_id,
-                        in_reply_to_user_screen_name,in_reply_to_status_id,
-                        depth,path,is_seed,seed_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, tuple(input_value + [seed_post['id']]))
+
+                for idx, result in enumerate(results):
+                    if result['depth'] == 2:
+                        write_results = construct_tree_nowrite(result, results, idx, [])
+
+                        input_values = [list(result.values()) + ['FALSE'] for result in write_results]
+                        for input_value in input_values:
+                            sql_statement = sql.SQL("INSERT INTO {output_table} ({select_cols}) VALUES (" + ', '.join(['%s'] * len(header_value)) + ")"). \
+                                format(select_cols=select_columns_sql, output_table=sql.SQL(output_table))
+                            cursor.execute(sql_statement, tuple(input_value + [seed_post['id'], reply_index]))
+                            reply_index += 1
 
             database.commit()
 
@@ -297,6 +301,20 @@ def construct_tree(row, results, idx, writer, select_columns):
             construct_tree(result, results, idx + sub_idx, writer, select_columns)
 
     return
+
+
+def construct_tree_nowrite(row, results, idx, output_results):
+
+    depth = row['depth']
+    parent_id = row['in_reply_to_status_id']
+    output_results += [row]
+    for sub_idx, result in enumerate(results[idx:]):
+        if result['depth'] == depth and result['in_reply_to_status_id'] == parent_id:
+            continue
+        elif result['in_reply_to_status_id'] == row['id']:
+            output_results = construct_tree_nowrite(result, results, idx + sub_idx, output_results)
+
+    return output_results
 
 
 if __name__ == '__main__':

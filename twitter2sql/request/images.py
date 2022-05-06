@@ -181,25 +181,22 @@ def get_top_images(input_hash,
         os.mkdir(output_directory)
 
     with open(input_hash, 'r') as f:
-        hash_dict = json.load(f)  
+        hash_dict = json.load(f)
 
-    hash_dict = {k: v for k, v in sorted(hash_dict.items(), key=lambda item: len(set([val['user_id'] for val in item[1]])), reverse=True)}
+    hash_dict = {k: v for k, v in sorted(hash_dict.items(), key=lambda item: len(set([val['user_id'] for val in item[1]['tweets']])), reverse=True)}
 
     count = 0
     for idx, (key, item) in enumerate(hash_dict.items()):
         if key == '__broken__':
             continue
-        print(key, len(item))
+        total_users = len(set([val['user_id'] for val in item['tweets']]))
+        print(key, total_users)
 
         # target_image = glob(os.path.join(images_directory, f'{item[0]}*'))
+        target_image = item["imgpath"]
 
-        for i in item:
-            target_image = glob(os.path.join(images_directory, f'{i["img_code"]}*'))
-            if target_image != []:
-                break
-
-        output_filename = os.path.join(output_directory, f'{str(idx).zfill(3)}_{os.path.basename(target_image[0])}')
-        copy(target_image[0], output_filename)
+        output_filename = os.path.join(output_directory, f'{str(idx).zfill(3)}_{os.path.basename(target_image)}')
+        copy(target_image, output_filename)
         count += 1
         if count == top_images:
             break
@@ -373,7 +370,7 @@ def cluster_features(
         title = "threshold: %f, number of clusters: %d" % (thresh, len(set(clusters)))
         plt.title(title)
         plt.show()
-    # plt.savefig("clusters.png")
+    plt.savefig("clusters.png")
 
     sorted_cluster_idx = np.argsort(clusters)
 

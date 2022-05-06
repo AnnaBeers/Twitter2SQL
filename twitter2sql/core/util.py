@@ -313,13 +313,19 @@ def sql_type_dictionary():
         in Twitter2SQL databases. 
     """
 
-    type_dict = {'user_id': 'bigint',
+    type_dict = {'id': 'bigint',
+    'user_id': 'bigint',
     'tweet': 'TEXT',
     'user_name': 'TEXT',
     'user_screen_name': 'TEXT',
     'in_reply_to_status_id': 'bigint',
     'created_at': 'timestamptz',
     'in_reply_to_user_screen_name': 'TEXT',
-    'in_reply_to_user_id': 'bigint'}
+    'in_reply_to_user_id': 'bigint',
+    'user_followers_count': 'bigint',
+    'in_reply_to_status_id': 'bigint',
+    'quoted_status_user_followers_count': 'int',
+    'user_verified': 'bool',
+    }
 
     return type_dict

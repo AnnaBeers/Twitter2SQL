@@ -491,6 +491,9 @@ def tweet_formats(formats):
         AND retweeted_status_id IS NULL \
         AND quoted_status_id IS NULL')
 
+    elif formats == 'parler_post':
+        return sql.SQL('parent is not NULL')
+
     column_dict = {'reply': 'in_reply_to_user_id',
             'quote': 'quoted_status_id',
             'retweet': 'retweeted_status_id'}
