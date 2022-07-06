@@ -2,7 +2,7 @@ pandas==0.25.3
 tqdm==4.36.1
 psycopg2==2.8.5
 altair==4.0.1
-lxml==4.4.1
+lxml==4.9.1
 pytz==2019.2
 requests==2.21.0
 tweepy==3.8.0
